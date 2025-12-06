@@ -578,6 +578,72 @@ def cmd_serve(args):
     return 0
 
 
+def cmd_version(args):
+    """Show version information."""
+    from . import __version__
+    config = get_config()
+    print(f"llama-memory {__version__}")
+    print(f"Embedding model: {config.embedding_model_version}")
+    print(f"Database: {config.database_path}")
+    return 0
+
+
+def cmd_backup(args):
+    """Create a backup of the database."""
+    import shutil
+    from datetime import datetime
+
+    config = get_config()
+
+    if not config.database_path.exists():
+        print("No database to backup")
+        return 1
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_name = f"memory_backup_{timestamp}.db"
+
+    if args.output:
+        backup_path = Path(args.output)
+    else:
+        backup_path = config.database_path.parent / backup_name
+
+    shutil.copy2(config.database_path, backup_path)
+    size_kb = backup_path.stat().st_size / 1024
+    print(f"Backed up to {backup_path} ({size_kb:.1f} KB)")
+    return 0
+
+
+def cmd_tags(args):
+    """List all tags in use."""
+    config = get_config()
+    store = get_store(config)
+
+    conn = store.db.conn
+    rows = conn.execute("""
+        SELECT tags FROM memories
+        WHERE archived = 0 AND tags IS NOT NULL AND tags != '[]'
+    """).fetchall()
+
+    tag_counts = {}
+    for row in rows:
+        tags = json.loads(row['tags'])
+        for tag in tags:
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+
+    if not tag_counts:
+        print("No tags found")
+        return 0
+
+    if args.format == 'json':
+        print(json.dumps(tag_counts, indent=2))
+    else:
+        print("Tags in use:")
+        for tag, count in sorted(tag_counts.items(), key=lambda x: -x[1]):
+            print(f"  {tag}: {count}")
+
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Local vector memory for AI assistants",
@@ -719,6 +785,20 @@ def main():
     # serve
     p_serve = subparsers.add_parser("serve", help="Run MCP server")
     p_serve.set_defaults(func=cmd_serve)
+
+    # version
+    p_version = subparsers.add_parser("version", help="Show version info")
+    p_version.set_defaults(func=cmd_version)
+
+    # backup
+    p_backup = subparsers.add_parser("backup", help="Create database backup")
+    p_backup.add_argument("--output", "-o", help="Output path (default: timestamped in data dir)")
+    p_backup.set_defaults(func=cmd_backup)
+
+    # tags
+    p_tags = subparsers.add_parser("tags", help="List all tags in use")
+    p_tags.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_tags.set_defaults(func=cmd_tags)
 
     args = parser.parse_args()
 
