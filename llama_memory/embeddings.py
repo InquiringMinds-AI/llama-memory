@@ -99,12 +99,15 @@ class EmbeddingGenerator:
             if cached is not None:
                 return cached
 
+        # Sanitize text: replace newlines with spaces to avoid breaking llama-embedding output
+        sanitized_text = ' '.join(text.split())
+
         try:
             result = subprocess.run(
                 [
                     str(self.config.embedding_binary),
                     "-m", str(self.config.embedding_model),
-                    "-p", text,
+                    "-p", sanitized_text,
                     "--embd-normalize", "2",  # L2 normalization
                 ],
                 capture_output=True,

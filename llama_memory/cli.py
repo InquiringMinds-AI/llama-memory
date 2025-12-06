@@ -329,9 +329,11 @@ def cmd_delete(args):
     config = get_config()
     store = get_store(config)
 
-    store.delete(args.id, hard=args.hard)
+    cascade = getattr(args, 'cascade', False)
+    store.delete(args.id, hard=args.hard, cascade=cascade)
     action = "Deleted" if args.hard else "Archived"
-    print(f"{action} memory {args.id}")
+    cascade_note = " (with children)" if cascade else ""
+    print(f"{action} memory {args.id}{cascade_note}")
     return 0
 
 
@@ -1537,6 +1539,7 @@ def main():
     p_del = subparsers.add_parser("delete", help="Delete (archive) a memory")
     p_del.add_argument("id", type=int)
     p_del.add_argument("--hard", action="store_true", help="Permanently delete")
+    p_del.add_argument("--cascade", action="store_true", help="Also delete child memories recursively")
     p_del.set_defaults(func=cmd_delete)
 
     # stats

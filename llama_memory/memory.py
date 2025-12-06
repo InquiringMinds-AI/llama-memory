@@ -452,6 +452,16 @@ class MemoryStore:
         """Search memories using full-text search (faster, less semantic)."""
         conn = self.db.conn
 
+        # Escape FTS5 special characters by wrapping each term in double quotes
+        # This prevents hyphens being interpreted as NOT operator, etc.
+        # Split on whitespace, quote each term, rejoin
+        escaped_terms = []
+        for term in query.split():
+            # Escape any double quotes within the term
+            escaped_term = term.replace('"', '""')
+            escaped_terms.append(f'"{escaped_term}"')
+        escaped_query = ' '.join(escaped_terms)
+
         sql = """
             SELECT m.* FROM memories m
             JOIN memories_fts f ON m.id = f.rowid
@@ -459,7 +469,7 @@ class MemoryStore:
               AND m.archived = 0
               AND m.superseded_by IS NULL
         """
-        params = [query]
+        params = [escaped_query]
 
         if type:
             sql += " AND m.type = ?"
@@ -644,13 +654,36 @@ class MemoryStore:
 
         return new_id
 
-    def delete(self, id: int, hard: bool = False) -> bool:
-        """Delete a memory. Soft delete by default (archive)."""
+    def delete(self, id: int, hard: bool = False, cascade: bool = False) -> bool:
+        """Delete a memory. Soft delete by default (archive).
+
+        Args:
+            id: Memory ID to delete
+            hard: If True, permanently delete instead of archiving
+            cascade: If True, also delete/archive child memories first
+
+        Returns:
+            True if deleted successfully
+        """
         conn = self.db.conn
         now = int(datetime.now().timestamp())
 
+        # Handle cascade delete - process children first
+        if cascade:
+            children = self.get_children(id)
+            for child in children:
+                self.delete(child.id, hard=hard, cascade=True)
+
         if hard:
+            # Delete links referencing this memory
+            conn.execute("DELETE FROM memory_links WHERE source_id = ? OR target_id = ?", (id, id))
+            # Delete embedding versions
+            conn.execute("DELETE FROM embedding_versions WHERE memory_id = ?", (id,))
+            # Delete from embeddings table
             conn.execute("DELETE FROM memory_embeddings WHERE memory_id = ?", (id,))
+            # Clear parent_id references from any remaining children
+            conn.execute("UPDATE memories SET parent_id = NULL WHERE parent_id = ?", (id,))
+            # Delete the memory itself
             conn.execute("DELETE FROM memories WHERE id = ?", (id,))
             action = 'hard_delete'
         else:
@@ -662,8 +695,8 @@ class MemoryStore:
 
         conn.execute("""
             INSERT INTO memory_log (memory_id, action, timestamp, details)
-            VALUES (?, ?, ?, NULL)
-        """, (id, action, now))
+            VALUES (?, ?, ?, ?)
+        """, (id, action, now, json.dumps({'cascade': cascade}) if cascade else None))
 
         conn.commit()
         return True

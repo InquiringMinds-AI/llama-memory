@@ -253,7 +253,7 @@ TOOLS = [
     },
     {
         "name": "memory_delete",
-        "description": "Delete (archive) a memory. Use hard=true to permanently delete.",
+        "description": "Delete (archive) a memory. Use hard=true to permanently delete. Use cascade=true to also delete child memories.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -263,6 +263,11 @@ TOOLS = [
                 "hard": {
                     "type": "boolean",
                     "description": "Permanently delete instead of archiving",
+                    "default": False
+                },
+                "cascade": {
+                    "type": "boolean",
+                    "description": "Also delete/archive child memories (and their children recursively)",
                     "default": False
                 }
             },
@@ -842,9 +847,10 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
             result_text = f"Created memory {new_id} superseding {args['old_id']}"
 
         elif tool_name == "memory_delete":
-            store.delete(args["id"], hard=args.get("hard", False))
+            store.delete(args["id"], hard=args.get("hard", False), cascade=args.get("cascade", False))
             action = "Deleted" if args.get("hard") else "Archived"
-            result_text = f"{action} memory {args['id']}"
+            cascade_note = " (with children)" if args.get("cascade") else ""
+            result_text = f"{action} memory {args['id']}{cascade_note}"
 
         elif tool_name == "memory_stats":
             result_text = json.dumps(store.stats(), indent=2)
