@@ -615,7 +615,7 @@ class MemoryStore:
             raise ValueError(f"Memory {old_id} not found")
 
         # Create new memory with same defaults
-        new_id = self.store(
+        new_id, _ = self.store(
             content=new_content,
             type=kwargs.get('type', old.type),
             summary=kwargs.get('summary', old.summary),
@@ -623,6 +623,7 @@ class MemoryStore:
             tags=kwargs.get('tags', old.tags),
             importance=kwargs.get('importance', old.importance),
             retention=kwargs.get('retention', old.retention),
+            force=True,  # Don't check for duplicates when superseding
         )
 
         # Mark old as superseded
