@@ -341,6 +341,46 @@ TOOLS = [
             },
             "required": ["id"]
         }
+    },
+    {
+        "name": "memory_projects",
+        "description": "List all projects with memory counts and last activity date.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
+        "name": "memory_sessions",
+        "description": "List recent sessions or get memories from a specific session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "If provided, return memories from this specific session"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of sessions or memories to return",
+                    "default": 20
+                }
+            }
+        }
+    },
+    {
+        "name": "memory_unarchive",
+        "description": "Restore an archived memory back to active status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "Memory ID to unarchive"
+                }
+            },
+            "required": ["id"]
+        }
     }
 ]
 
@@ -544,6 +584,83 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
 
                 results = results[:limit]
                 result_text = json.dumps(results, indent=2)
+
+        elif tool_name == "memory_projects":
+            conn = store.db.conn
+            rows = conn.execute("""
+                SELECT project, COUNT(*) as count,
+                       MAX(importance) as max_importance,
+                       MAX(created_at) as latest
+                FROM memories
+                WHERE archived = 0 AND project IS NOT NULL AND project != ''
+                GROUP BY project
+                ORDER BY count DESC
+            """).fetchall()
+
+            projects = {}
+            for row in rows:
+                projects[row['project']] = {
+                    'count': row['count'],
+                    'max_importance': row['max_importance'],
+                    'latest': row['latest']
+                }
+            result_text = json.dumps(projects, indent=2)
+
+        elif tool_name == "memory_sessions":
+            conn = store.db.conn
+            session_id = args.get("session_id")
+            limit = args.get("limit", 20)
+
+            if session_id:
+                # Get memories from specific session
+                rows = conn.execute("""
+                    SELECT id, content, type, importance, created_at
+                    FROM memories
+                    WHERE session_id = ? AND archived = 0
+                    ORDER BY created_at ASC
+                """, (session_id,)).fetchall()
+
+                memories = [
+                    {
+                        'id': row['id'],
+                        'content': row['content'],
+                        'type': row['type'],
+                        'importance': row['importance'],
+                        'created_at': row['created_at']
+                    }
+                    for row in rows
+                ]
+                result_text = json.dumps({"session_id": session_id, "memories": memories}, indent=2)
+            else:
+                # List sessions
+                rows = conn.execute("""
+                    SELECT session_id, COUNT(*) as count,
+                           MIN(created_at) as started,
+                           MAX(created_at) as ended
+                    FROM memories
+                    WHERE session_id IS NOT NULL AND archived = 0
+                    GROUP BY session_id
+                    ORDER BY started DESC
+                    LIMIT ?
+                """, (limit,)).fetchall()
+
+                sessions = [
+                    {
+                        'session_id': row['session_id'],
+                        'count': row['count'],
+                        'started': row['started'],
+                        'ended': row['ended']
+                    }
+                    for row in rows
+                ]
+                result_text = json.dumps(sessions, indent=2)
+
+        elif tool_name == "memory_unarchive":
+            success = store.unarchive(args["id"])
+            if success:
+                result_text = f"Unarchived memory {args['id']}"
+            else:
+                result_text = f"Memory {args['id']} not found"
 
         else:
             send_response(id, error={"code": -32601, "message": f"Unknown tool: {tool_name}"})

@@ -266,6 +266,8 @@ class MemoryStore:
         min_importance: Optional[int] = None,
         include_archived: bool = False,
         hybrid_ranking: bool = True,
+        after: Optional[int] = None,
+        before: Optional[int] = None,
     ) -> list[Memory]:
         """Search memories by semantic similarity with hybrid ranking.
 
@@ -313,6 +315,14 @@ class MemoryStore:
         if min_importance:
             sql += " AND m.importance >= ?"
             params.append(min_importance)
+
+        if after:
+            sql += " AND m.created_at >= ?"
+            params.append(after)
+
+        if before:
+            sql += " AND m.created_at <= ?"
+            params.append(before)
 
         # Exclude superseded memories
         sql += " AND m.superseded_by IS NULL"
@@ -436,6 +446,8 @@ class MemoryStore:
         project: Optional[str] = None,
         include_archived: bool = False,
         order_by: str = 'created_at',
+        after: Optional[int] = None,
+        before: Optional[int] = None,
     ) -> list[Memory]:
         """List memories without search."""
         conn = self.db.conn
@@ -457,6 +469,14 @@ class MemoryStore:
         if project:
             sql += " AND (project = ? OR project IS NULL)"
             params.append(project)
+
+        if after:
+            sql += " AND created_at >= ?"
+            params.append(after)
+
+        if before:
+            sql += " AND created_at <= ?"
+            params.append(before)
 
         sql += f" ORDER BY {order_by} DESC LIMIT ?"
         params.append(limit)
@@ -646,6 +666,87 @@ class MemoryStore:
         """Export all memories as JSON-serializable list."""
         memories = self.list(limit=100000, include_archived=include_archived)
         return [m.to_dict() for m in memories]
+
+    def unarchive(self, id: int) -> bool:
+        """Restore an archived memory."""
+        conn = self.db.conn
+        now = int(datetime.now().timestamp())
+
+        # Check if memory exists and is archived
+        row = conn.execute("SELECT archived FROM memories WHERE id = ?", (id,)).fetchone()
+        if not row:
+            return False
+        if not row['archived']:
+            return True  # Already unarchived
+
+        conn.execute(
+            "UPDATE memories SET archived = 0, updated_at = ? WHERE id = ?",
+            (now, id)
+        )
+
+        conn.execute("""
+            INSERT INTO memory_log (memory_id, action, timestamp, details)
+            VALUES (?, 'unarchive', ?, NULL)
+        """, (id, now))
+
+        conn.commit()
+        return True
+
+    def reembed(self, id: Optional[int] = None, model_filter: Optional[str] = None) -> int:
+        """Regenerate embeddings for memories.
+
+        Args:
+            id: If provided, only reembed this specific memory
+            model_filter: If provided, only reembed memories with this embedding model
+
+        Returns:
+            Number of memories re-embedded
+        """
+        conn = self.db.conn
+        now = int(datetime.now().timestamp())
+        count = 0
+
+        if id:
+            # Reembed single memory
+            row = conn.execute("SELECT content FROM memories WHERE id = ?", (id,)).fetchone()
+            if row:
+                embedding = get_embedding(row['content'], self.config)
+                embedding_blob = embedding_to_blob(embedding)
+                conn.execute(
+                    "UPDATE memory_embeddings SET embedding = ? WHERE memory_id = ?",
+                    (embedding_blob, id)
+                )
+                conn.execute(
+                    "UPDATE memories SET embedding_model = ?, updated_at = ? WHERE id = ?",
+                    (self.config.embedding_model_version, now, id)
+                )
+                count = 1
+        else:
+            # Reembed all (optionally filtered by model)
+            sql = "SELECT id, content FROM memories WHERE archived = 0"
+            params = []
+
+            if model_filter:
+                sql += " AND embedding_model = ?"
+                params.append(model_filter)
+
+            rows = conn.execute(sql, params).fetchall()
+
+            for row in rows:
+                embedding = get_embedding(row['content'], self.config)
+                embedding_blob = embedding_to_blob(embedding)
+                conn.execute(
+                    "UPDATE memory_embeddings SET embedding = ? WHERE memory_id = ?",
+                    (embedding_blob, row['id'])
+                )
+                conn.execute(
+                    "UPDATE memories SET embedding_model = ?, updated_at = ? WHERE id = ?",
+                    (self.config.embedding_model_version, now, row['id'])
+                )
+                count += 1
+
+        conn.commit()
+        return count
 
     def cleanup_expired(self) -> int:
         """Archive memories past their retention period. Returns count archived."""

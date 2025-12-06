@@ -12,6 +12,32 @@ from .database import get_database
 from .memory import get_store, MemoryStore
 
 
+def parse_date(date_str: str) -> int:
+    """Parse date string to timestamp. Supports YYYY-MM-DD or relative like '7d', '1w', '1m'."""
+    from datetime import datetime, timedelta
+
+    if not date_str:
+        return None
+
+    # Relative dates
+    if date_str.endswith('d'):
+        days = int(date_str[:-1])
+        return int((datetime.now() - timedelta(days=days)).timestamp())
+    elif date_str.endswith('w'):
+        weeks = int(date_str[:-1])
+        return int((datetime.now() - timedelta(weeks=weeks)).timestamp())
+    elif date_str.endswith('m'):
+        months = int(date_str[:-1])
+        return int((datetime.now() - timedelta(days=months * 30)).timestamp())
+
+    # Absolute date
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return int(dt.timestamp())
+    except ValueError:
+        raise ValueError(f"Invalid date format: {date_str}. Use YYYY-MM-DD or relative (7d, 1w, 1m)")
+
+
 def cmd_init(args):
     """Initialize the memory database."""
     config = get_config()
@@ -175,6 +201,10 @@ def cmd_search(args):
     config = get_config()
     store = get_store(config)
 
+    # Parse date filters
+    after = parse_date(args.after) if hasattr(args, 'after') and args.after else None
+    before = parse_date(args.before) if hasattr(args, 'before') and args.before else None
+
     results = store.search(
         query=args.query,
         limit=args.limit,
@@ -183,6 +213,8 @@ def cmd_search(args):
         session_id=args.session,
         min_importance=args.min_importance,
         hybrid_ranking=not args.no_hybrid,
+        after=after,
+        before=before,
     )
 
     if args.format == 'json':
@@ -227,12 +259,18 @@ def cmd_list(args):
     config = get_config()
     store = get_store(config)
 
+    # Parse date filters
+    after = parse_date(args.after) if hasattr(args, 'after') and args.after else None
+    before = parse_date(args.before) if hasattr(args, 'before') and args.before else None
+
     results = store.list(
         limit=args.limit,
         type=args.type,
         project=args.project,
         order_by=args.order_by,
         include_archived=args.archived,
+        after=after,
+        before=before,
     )
 
     if args.format == 'json':
@@ -709,6 +747,58 @@ def cmd_projects(args):
     return 0
 
 
+def cmd_unarchive(args):
+    """Restore an archived memory."""
+    config = get_config()
+    store = get_store(config)
+
+    success = store.unarchive(args.id)
+    if success:
+        print(f"Unarchived memory {args.id}")
+    else:
+        print(f"Memory {args.id} not found")
+        return 1
+    return 0
+
+
+def cmd_reembed(args):
+    """Regenerate embeddings for memories."""
+    config = get_config()
+    store = get_store(config)
+
+    if args.id:
+        count = store.reembed(id=args.id)
+        if count:
+            print(f"Re-embedded memory {args.id}")
+        else:
+            print(f"Memory {args.id} not found")
+            return 1
+    else:
+        # Show what would be re-embedded
+        conn = store.db.conn
+        if args.old_model:
+            rows = conn.execute(
+                "SELECT COUNT(*) as cnt FROM memories WHERE archived = 0 AND embedding_model = ?",
+                (args.old_model,)
+            ).fetchone()
+            target = f"memories with model '{args.old_model}'"
+        else:
+            rows = conn.execute("SELECT COUNT(*) as cnt FROM memories WHERE archived = 0").fetchone()
+            target = "all memories"
+
+        if not args.yes:
+            print(f"This will re-embed {rows['cnt']} {target}")
+            print(f"New model: {config.embedding_model_version}")
+            print("This may take a while. Use --yes to confirm.")
+            return 0
+
+        print(f"Re-embedding {rows['cnt']} {target}...")
+        count = store.reembed(model_filter=args.old_model)
+        print(f"Re-embedded {count} memories")
+
+    return 0
+
+
 def cmd_sessions(args):
     """List and browse sessions."""
     config = get_config()
@@ -834,6 +924,8 @@ def main():
     p_search.add_argument("--project", "-p")
     p_search.add_argument("--session", help="Filter by session ID")
     p_search.add_argument("--min-importance", type=int)
+    p_search.add_argument("--after", help="Only memories after date (YYYY-MM-DD or 7d, 1w, 1m)")
+    p_search.add_argument("--before", help="Only memories before date (YYYY-MM-DD or 7d, 1w, 1m)")
     p_search.add_argument("--no-hybrid", action="store_true", help="Disable hybrid ranking (use raw distance)")
     p_search.add_argument("--format", "-f", choices=["text", "json"], default="json")
     p_search.set_defaults(func=cmd_search)
@@ -855,6 +947,8 @@ def main():
     p_list.add_argument("--order-by", "-o", default="created_at",
                         choices=["created_at", "updated_at", "accessed_at", "importance"])
     p_list.add_argument("--archived", "-a", action="store_true")
+    p_list.add_argument("--after", help="Only memories after date (YYYY-MM-DD or 7d, 1w, 1m)")
+    p_list.add_argument("--before", help="Only memories before date (YYYY-MM-DD or 7d, 1w, 1m)")
     p_list.add_argument("--format", "-f", choices=["text", "json"], default="json")
     p_list.set_defaults(func=cmd_list)
 
@@ -960,6 +1054,18 @@ def main():
     p_sessions.add_argument("--limit", "-l", type=int, default=20, help="Number of sessions to show")
     p_sessions.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_sessions.set_defaults(func=cmd_sessions)
+
+    # unarchive
+    p_unarchive = subparsers.add_parser("unarchive", help="Restore an archived memory")
+    p_unarchive.add_argument("id", type=int, help="Memory ID to unarchive")
+    p_unarchive.set_defaults(func=cmd_unarchive)
+
+    # reembed
+    p_reembed = subparsers.add_parser("reembed", help="Regenerate embeddings for memories")
+    p_reembed.add_argument("--id", type=int, help="Specific memory ID to re-embed")
+    p_reembed.add_argument("--old-model", help="Only re-embed memories with this embedding model version")
+    p_reembed.add_argument("--yes", "-y", action="store_true", help="Confirm re-embedding all memories")
+    p_reembed.set_defaults(func=cmd_reembed)
 
     args = parser.parse_args()
 

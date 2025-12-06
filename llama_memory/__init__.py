@@ -5,7 +5,7 @@ Uses llama.cpp for embeddings and sqlite-vec for similarity search.
 Fully local, no external APIs required.
 """
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 from .config import Config, get_config, ensure_directories
 from .memory import (
