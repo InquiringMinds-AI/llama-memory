@@ -16,10 +16,13 @@ llama-memory solves this by using llama.cpp, which compiles to a single binary a
 ## Features
 
 - **Semantic search** - Find related memories even without exact keyword matches
+- **Hybrid ranking** - Combines vector distance with importance, recency, and access patterns
+- **Duplicate detection** - Warns before storing similar content
+- **Session tracking** - Groups memories by conversation session
 - **Fully local** - No internet required after setup
 - **Lightweight** - ~21MB embedding model, <150KB sqlite-vec extension
-- **MCP server** - Works with Claude Code and any MCP client
-- **CLI tool** - Full command-line interface
+- **MCP server** - Works with Claude Code and any MCP client (17 tools)
+- **CLI tool** - Full command-line interface (28 commands)
 - **Python API** - Import and use directly
 - **Runs on Android** - Works in Termux with Snapdragon 8 Elite and similar hardware
 - **5-year retention** - Built for long-term memory with configurable retention policies
@@ -114,17 +117,58 @@ If you prefer to set things up manually:
 # Store a memory
 llama-memory store "User prefers dark mode and F-Droid apps" --type fact --importance 8
 
+# Store with duplicate detection (warns if similar exists)
+llama-memory store "User likes dark mode" --type fact
+# Use --force to store anyway
+
 # Semantic search
 llama-memory search "what apps does the user like"
 
+# Search with date filters
+llama-memory search "deployments" --after 2025-01-01 --before 2025-06-01
+llama-memory search "recent bugs" --after 7d   # last 7 days
+llama-memory search "this month" --after 1m    # relative dates: 7d, 1w, 1m
+
 # List recent memories
 llama-memory list --limit 10
+llama-memory list --after 1w --project myapi
+
+# Browse projects and sessions
+llama-memory projects
+llama-memory sessions
+llama-memory sessions session-1234567890  # view specific session
 
 # Get statistics
 llama-memory stats
 
+# Find related memories
+llama-memory related 42  # finds similar, same-session, supersession chain
+
 # Export all memories
 llama-memory export -o backup.json
+```
+
+### Memory Management
+
+```bash
+# Update a memory
+llama-memory update 42 --importance 9
+
+# Archive (soft delete) and restore
+llama-memory delete 42
+llama-memory unarchive 42
+
+# Replace outdated information
+llama-memory supersede 42 "Updated information here"
+
+# Backup and restore
+llama-memory backup
+llama-memory backup --output /path/to/backup.db
+llama-memory restore /path/to/backup.db
+
+# Re-embed all memories (after model upgrade)
+llama-memory reembed --yes
+llama-memory reembed --old-model "previous-model-name" --yes
 ```
 
 ### Python API
@@ -168,17 +212,25 @@ Add to your Claude Code settings (`~/.claude/settings.local.json`):
 ```
 
 Then Claude Code will have access to these tools:
-- `memory_store` - Store new memories
-- `memory_search` - Semantic similarity search
-- `memory_search_text` - Fast full-text search
-- `memory_list` - List recent memories
-- `memory_get` - Get by ID
-- `memory_update` - Update existing
-- `memory_supersede` - Replace outdated info
-- `memory_delete` - Archive or delete
-- `memory_stats` - Statistics
-- `memory_export` - Export to JSON
-- `memory_cleanup` - Archive expired memories
+
+| Tool | Description |
+|------|-------------|
+| `memory_store` | Store new memories (with duplicate detection) |
+| `memory_search` | Semantic search with hybrid ranking |
+| `memory_search_text` | Fast full-text search |
+| `memory_list` | List recent memories |
+| `memory_get` | Get by ID |
+| `memory_update` | Update existing |
+| `memory_supersede` | Replace outdated info |
+| `memory_delete` | Archive or delete |
+| `memory_unarchive` | Restore archived memory |
+| `memory_stats` | Statistics |
+| `memory_export` | Export to JSON |
+| `memory_cleanup` | Archive expired memories |
+| `memory_recall` | Get context block for session start |
+| `memory_related` | Find related memories |
+| `memory_projects` | List all projects |
+| `memory_sessions` | List/browse sessions |
 
 ## Memory Types
 
@@ -205,13 +257,20 @@ Run `llama-memory cleanup` periodically to archive expired memories.
 
 ## Model Changes
 
-If you switch embedding models, run the migration script:
+If you switch embedding models, use the reembed command:
 
 ```bash
-python scripts/migrate.py
+# Preview what will be re-embedded
+llama-memory reembed
+
+# Re-embed all memories
+llama-memory reembed --yes
+
+# Only re-embed memories from old model
+llama-memory reembed --old-model "previous-model-name" --yes
 ```
 
-This re-embeds all memories with the new model while preserving the original text.
+This regenerates embeddings while preserving the original text.
 
 ## Architecture
 

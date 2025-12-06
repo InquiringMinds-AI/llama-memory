@@ -799,6 +799,138 @@ def cmd_reembed(args):
     return 0
 
 
+def cmd_vacuum(args):
+    """Optimize the database by running VACUUM."""
+    config = get_config()
+
+    if not config.database_path.exists():
+        print("No database to vacuum")
+        return 1
+
+    # Get size before
+    size_before = config.database_path.stat().st_size
+
+    # Run vacuum
+    import sqlite3
+    conn = sqlite3.connect(config.database_path)
+    conn.execute("VACUUM")
+    conn.close()
+
+    # Get size after
+    size_after = config.database_path.stat().st_size
+    saved = size_before - size_after
+
+    print(f"Database optimized")
+    print(f"  Before: {size_before / 1024:.1f} KB")
+    print(f"  After:  {size_after / 1024:.1f} KB")
+    if saved > 0:
+        print(f"  Saved:  {saved / 1024:.1f} KB ({saved * 100 / size_before:.1f}%)")
+    else:
+        print(f"  No space reclaimed (database already optimized)")
+
+    return 0
+
+
+def cmd_history(args):
+    """Show history for a specific memory."""
+    config = get_config()
+    store = get_store(config)
+
+    conn = store.db.conn
+
+    # Get memory info
+    memory = store.get(args.id)
+    if not memory:
+        print(f"Memory {args.id} not found")
+        return 1
+
+    # Get log entries
+    rows = conn.execute("""
+        SELECT action, timestamp, details
+        FROM memory_log
+        WHERE memory_id = ?
+        ORDER BY timestamp ASC
+    """, (args.id,)).fetchall()
+
+    if args.format == 'json':
+        history = {
+            'memory': memory.to_dict(),
+            'events': [
+                {
+                    'action': row['action'],
+                    'timestamp': row['timestamp'],
+                    'details': json.loads(row['details']) if row['details'] else None
+                }
+                for row in rows
+            ]
+        }
+        print(json.dumps(history, indent=2))
+    else:
+        from datetime import datetime
+        print(f"History for memory {args.id}:")
+        print(f"  Content: {memory.content[:80]}...")
+        print(f"  Created: {datetime.fromtimestamp(memory.created_at).strftime('%Y-%m-%d %H:%M')}")
+        print(f"  Accessed: {memory.access_count}x")
+        print()
+        print("Events:")
+        for row in rows:
+            ts = datetime.fromtimestamp(row['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+            details = ""
+            if row['details']:
+                d = json.loads(row['details'])
+                details = f" - {d}" if d else ""
+            print(f"  [{ts}] {row['action']}{details}")
+
+    return 0
+
+
+def cmd_count(args):
+    """Count memories with optional filters."""
+    config = get_config()
+    store = get_store(config)
+
+    conn = store.db.conn
+
+    sql = "SELECT COUNT(*) as cnt FROM memories WHERE 1=1"
+    params = []
+
+    if not args.include_archived:
+        sql += " AND archived = 0"
+
+    if args.type:
+        sql += " AND type = ?"
+        params.append(args.type)
+
+    if args.project:
+        sql += " AND project = ?"
+        params.append(args.project)
+
+    if args.min_importance:
+        sql += " AND importance >= ?"
+        params.append(args.min_importance)
+
+    row = conn.execute(sql, params).fetchone()
+    count = row['cnt']
+
+    if args.quiet:
+        print(count)
+    else:
+        filters = []
+        if args.type:
+            filters.append(f"type={args.type}")
+        if args.project:
+            filters.append(f"project={args.project}")
+        if args.min_importance:
+            filters.append(f"importance>={args.min_importance}")
+        if args.include_archived:
+            filters.append("including archived")
+
+        filter_str = f" ({', '.join(filters)})" if filters else ""
+        print(f"{count} memories{filter_str}")
+
+    return 0
+
+
 def cmd_sessions(args):
     """List and browse sessions."""
     config = get_config()
@@ -1066,6 +1198,25 @@ def main():
     p_reembed.add_argument("--old-model", help="Only re-embed memories with this embedding model version")
     p_reembed.add_argument("--yes", "-y", action="store_true", help="Confirm re-embedding all memories")
     p_reembed.set_defaults(func=cmd_reembed)
+
+    # vacuum
+    p_vacuum = subparsers.add_parser("vacuum", help="Optimize database (reclaim space)")
+    p_vacuum.set_defaults(func=cmd_vacuum)
+
+    # history
+    p_history = subparsers.add_parser("history", help="Show history for a memory")
+    p_history.add_argument("id", type=int, help="Memory ID")
+    p_history.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_history.set_defaults(func=cmd_history)
+
+    # count
+    p_count = subparsers.add_parser("count", help="Count memories")
+    p_count.add_argument("--type", "-t", help="Filter by type")
+    p_count.add_argument("--project", "-p", help="Filter by project")
+    p_count.add_argument("--min-importance", "-i", type=int, help="Minimum importance")
+    p_count.add_argument("--include-archived", "-a", action="store_true", help="Include archived")
+    p_count.add_argument("--quiet", "-q", action="store_true", help="Output number only")
+    p_count.set_defaults(func=cmd_count)
 
     args = parser.parse_args()
 
