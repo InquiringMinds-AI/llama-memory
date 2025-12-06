@@ -1,12 +1,14 @@
 """
-Embedding generation using llama.cpp.
+Embedding generation using llama.cpp with caching.
 """
 
 from __future__ import annotations
 
 import os
+import hashlib
 import subprocess
 from typing import Optional
+from collections import OrderedDict
 from .config import Config, get_config
 
 
@@ -15,11 +17,53 @@ class EmbeddingError(Exception):
     pass
 
 
-class EmbeddingGenerator:
-    """Generate embeddings using llama.cpp."""
+class LRUCache:
+    """Simple LRU cache for embeddings."""
 
-    def __init__(self, config: Optional[Config] = None):
+    def __init__(self, maxsize: int = 1000):
+        self.cache: OrderedDict[str, list[float]] = OrderedDict()
+        self.maxsize = maxsize
+        self.hits = 0
+        self.misses = 0
+
+    def _hash(self, text: str) -> str:
+        return hashlib.md5(text.encode()).hexdigest()
+
+    def get(self, text: str) -> Optional[list[float]]:
+        key = self._hash(text)
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            self.hits += 1
+            return self.cache[key]
+        self.misses += 1
+        return None
+
+    def put(self, text: str, embedding: list[float]):
+        key = self._hash(text)
+        if key in self.cache:
+            self.cache.move_to_end(key)
+        else:
+            if len(self.cache) >= self.maxsize:
+                self.cache.popitem(last=False)
+            self.cache[key] = embedding
+
+    def stats(self) -> dict:
+        total = self.hits + self.misses
+        return {
+            "size": len(self.cache),
+            "maxsize": self.maxsize,
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_rate": f"{(self.hits / total * 100):.1f}%" if total > 0 else "0%"
+        }
+
+
+class EmbeddingGenerator:
+    """Generate embeddings using llama.cpp with LRU cache."""
+
+    def __init__(self, config: Optional[Config] = None, cache_size: int = 1000):
         self.config = config or get_config()
+        self.cache = LRUCache(cache_size)
         self._validate()
 
     def _validate(self):
@@ -44,10 +88,16 @@ class EmbeddingGenerator:
             env["LD_LIBRARY_PATH"] = f"{self.config.embedding_lib_path}:{existing}"
         return env
 
-    def generate(self, text: str) -> list[float]:
-        """Generate embedding for text."""
+    def generate(self, text: str, use_cache: bool = True) -> list[float]:
+        """Generate embedding for text, using cache if available."""
         if not text or not text.strip():
             raise EmbeddingError("Cannot generate embedding for empty text")
+
+        # Check cache first
+        if use_cache:
+            cached = self.cache.get(text)
+            if cached is not None:
+                return cached
 
         try:
             result = subprocess.run(
@@ -79,6 +129,10 @@ class EmbeddingGenerator:
                             f"got {len(embedding)}"
                         )
 
+                    # Store in cache
+                    if use_cache:
+                        self.cache.put(text, embedding)
+
                     return embedding
 
             raise EmbeddingError(f"No embedding found in output: {all_output[:500]}")
@@ -89,6 +143,10 @@ class EmbeddingGenerator:
             if isinstance(e, EmbeddingError):
                 raise
             raise EmbeddingError(f"Embedding generation error: {e}")
+
+    def cache_stats(self) -> dict:
+        """Get cache statistics."""
+        return self.cache.stats()
 
     def generate_batch(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for multiple texts."""

@@ -197,7 +197,52 @@ def cmd_stats(args):
     store = get_store(config)
 
     stats = store.stats()
-    print(json.dumps(stats, indent=2))
+
+    if args.format == 'json':
+        print(json.dumps(stats, indent=2))
+    else:
+        print("=== Memory Statistics ===\n")
+        print(f"Total memories: {stats['total']}")
+        print(f"Archived: {stats['archived']}")
+        print(f"Database size: {stats['database_size_bytes'] / 1024:.1f} KB")
+        print(f"Schema version: {stats['schema_version']}")
+        print(f"Embedding model: {stats['embedding_model']}")
+
+        if stats['by_type']:
+            print("\nBy type:")
+            for t, count in sorted(stats['by_type'].items()):
+                print(f"  {t}: {count}")
+
+        if stats['by_project']:
+            print("\nBy project:")
+            for p, count in sorted(stats['by_project'].items()):
+                print(f"  {p}: {count}")
+
+        # Get most accessed memories
+        conn = store.db.conn
+        top_accessed = conn.execute("""
+            SELECT id, content, access_count FROM memories
+            WHERE archived = 0 AND access_count > 0
+            ORDER BY access_count DESC LIMIT 5
+        """).fetchall()
+
+        if top_accessed:
+            print("\nMost accessed:")
+            for row in top_accessed:
+                print(f"  [{row['id']}] ({row['access_count']}x) {row['content'][:50]}...")
+
+        # Get oldest unaccessed memories
+        old_unaccessed = conn.execute("""
+            SELECT id, content, created_at FROM memories
+            WHERE archived = 0 AND (accessed_at IS NULL OR access_count = 0)
+            ORDER BY created_at ASC LIMIT 5
+        """).fetchall()
+
+        if old_unaccessed:
+            print("\nNever accessed:")
+            for row in old_unaccessed:
+                print(f"  [{row['id']}] {row['content'][:50]}...")
+
     return 0
 
 
@@ -224,6 +269,128 @@ def cmd_cleanup(args):
 
     count = store.cleanup_expired()
     print(f"Archived {count} expired memories")
+    return 0
+
+
+def cmd_recall(args):
+    """Generate context block for session start."""
+    config = get_config()
+    store = get_store(config)
+
+    # Get relevant memories based on query or defaults
+    if args.query:
+        memories = store.search(
+            query=args.query,
+            limit=args.limit,
+            project=args.project,
+            min_importance=args.min_importance or 5,
+        )
+    else:
+        # Get recent high-importance memories
+        memories = store.list(
+            limit=args.limit,
+            project=args.project,
+            order_by='accessed_at',
+        )
+        # Filter to importance >= 7 for auto-recall
+        memories = [m for m in memories if m.importance >= (args.min_importance or 7)]
+
+    if not memories:
+        print("No relevant memories found.")
+        return 0
+
+    # Format as context block
+    if args.format == 'markdown':
+        print("# Memory Context\n")
+        for m in memories:
+            print(f"## [{m.type.upper()}] (importance: {m.importance})")
+            if m.project:
+                print(f"*Project: {m.project}*\n")
+            print(m.content)
+            print()
+    elif args.format == 'compact':
+        for m in memories:
+            prefix = f"[{m.type}:{m.importance}]"
+            if m.project:
+                prefix += f" ({m.project})"
+            print(f"{prefix} {m.content[:150]}{'...' if len(m.content) > 150 else ''}")
+    else:  # json
+        print(json.dumps([m.to_dict() for m in memories], indent=2))
+
+    return 0
+
+
+def cmd_related(args):
+    """Find memories related to a specific memory."""
+    config = get_config()
+    store = get_store(config)
+
+    # Get the source memory
+    source = store.get(args.id)
+    if not source:
+        print(f"Memory {args.id} not found")
+        return 1
+
+    results = []
+
+    # Find semantically similar memories
+    similar = store.search(
+        query=source.content,
+        limit=args.limit + 1,  # +1 because source will match itself
+    )
+    for m in similar:
+        if m.id != source.id:
+            m.tags = m.tags + ['similar']
+            results.append(m)
+
+    # Find memories from same session
+    if source.session_id:
+        session_memories = store.search(
+            query=source.content,
+            limit=50,
+            session_id=source.session_id,
+        )
+        for m in session_memories:
+            if m.id != source.id and m.id not in [r.id for r in results]:
+                m.tags = m.tags + ['same-session']
+                results.append(m)
+
+    # Find memories that superseded or were superseded by this one
+    if source.superseded_by:
+        newer = store.get(source.superseded_by)
+        if newer:
+            newer.tags = newer.tags + ['supersedes-this']
+            results.append(newer)
+
+    # Check if this supersedes something
+    conn = store.db.conn
+    older_row = conn.execute(
+        "SELECT id FROM memories WHERE superseded_by = ?", (source.id,)
+    ).fetchone()
+    if older_row:
+        older = store.get(older_row['id'])
+        if older:
+            older.tags = older.tags + ['superseded-by-this']
+            results.append(older)
+
+    # Deduplicate and limit
+    seen = set()
+    unique_results = []
+    for m in results:
+        if m.id not in seen:
+            seen.add(m.id)
+            unique_results.append(m)
+
+    unique_results = unique_results[:args.limit]
+
+    if args.format == 'json':
+        print(json.dumps([m.to_dict() for m in unique_results], indent=2))
+    else:
+        print(f"Related to [{source.id}]: {source.content[:80]}...\n")
+        for m in unique_results:
+            relation = ', '.join([t for t in m.tags if t in ['similar', 'same-session', 'supersedes-this', 'superseded-by-this']])
+            print(f"[{m.id}] ({relation}) {m.content[:100]}{'...' if len(m.content) > 100 else ''}")
+
     return 0
 
 
@@ -390,6 +557,7 @@ def main():
 
     # stats
     p_stats = subparsers.add_parser("stats", help="Show statistics")
+    p_stats.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_stats.set_defaults(func=cmd_stats)
 
     # export
@@ -401,6 +569,22 @@ def main():
     # cleanup
     p_cleanup = subparsers.add_parser("cleanup", help="Archive expired memories")
     p_cleanup.set_defaults(func=cmd_cleanup)
+
+    # recall
+    p_recall = subparsers.add_parser("recall", help="Generate context block for session start")
+    p_recall.add_argument("query", nargs="?", help="Optional search query")
+    p_recall.add_argument("--limit", "-l", type=int, default=10)
+    p_recall.add_argument("--project", "-p", help="Filter by project")
+    p_recall.add_argument("--min-importance", "-i", type=int, help="Minimum importance (default 7 for auto, 5 with query)")
+    p_recall.add_argument("--format", "-f", choices=["markdown", "compact", "json"], default="compact")
+    p_recall.set_defaults(func=cmd_recall)
+
+    # related
+    p_related = subparsers.add_parser("related", help="Find memories related to a specific memory")
+    p_related.add_argument("id", type=int, help="Memory ID to find relations for")
+    p_related.add_argument("--limit", "-l", type=int, default=10)
+    p_related.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_related.set_defaults(func=cmd_related)
 
     # config
     p_config = subparsers.add_parser("config", help="Show configuration")
