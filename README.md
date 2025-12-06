@@ -161,6 +161,10 @@ llama-memory update 42 --importance 9
 llama-memory delete 42
 llama-memory unarchive 42
 
+# Delete with children (cascade)
+llama-memory delete 42 --cascade           # archive parent and all children
+llama-memory delete 42 --hard --cascade    # permanently delete parent and children
+
 # Replace outdated information
 llama-memory supersede 42 "Updated information here"
 
@@ -225,7 +229,7 @@ Then Claude Code will have access to 34 memory tools:
 | `memory_get` | Get by ID |
 | `memory_update` | Update existing |
 | `memory_supersede` | Replace outdated info |
-| `memory_delete` | Archive or delete |
+| `memory_delete` | Archive or delete (with cascade option) |
 | `memory_unarchive` | Restore archived memory |
 | `memory_stats` | Statistics |
 | `memory_export` | Export to JSON |
