@@ -644,6 +644,149 @@ def cmd_tags(args):
     return 0
 
 
+def cmd_restore(args):
+    """Restore database from a backup."""
+    import shutil
+
+    config = get_config()
+    backup_path = Path(args.file)
+
+    if not backup_path.exists():
+        print(f"Backup file not found: {backup_path}")
+        return 1
+
+    # Safety check - create a backup of current before restoring
+    if config.database_path.exists() and not args.no_backup:
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safety_backup = config.database_path.parent / f"memory_pre_restore_{timestamp}.db"
+        shutil.copy2(config.database_path, safety_backup)
+        print(f"Current database backed up to: {safety_backup}")
+
+    shutil.copy2(backup_path, config.database_path)
+    size_kb = config.database_path.stat().st_size / 1024
+    print(f"Restored from {backup_path} ({size_kb:.1f} KB)")
+    return 0
+
+
+def cmd_projects(args):
+    """List all projects in use."""
+    config = get_config()
+    store = get_store(config)
+
+    conn = store.db.conn
+    rows = conn.execute("""
+        SELECT project, COUNT(*) as count,
+               MAX(importance) as max_importance,
+               MAX(created_at) as latest
+        FROM memories
+        WHERE archived = 0 AND project IS NOT NULL AND project != ''
+        GROUP BY project
+        ORDER BY count DESC
+    """).fetchall()
+
+    if not rows:
+        print("No projects found")
+        return 0
+
+    if args.format == 'json':
+        projects = {
+            row['project']: {
+                'count': row['count'],
+                'max_importance': row['max_importance'],
+                'latest': row['latest']
+            }
+            for row in rows
+        }
+        print(json.dumps(projects, indent=2))
+    else:
+        print("Projects:")
+        for row in rows:
+            from datetime import datetime
+            latest = datetime.fromtimestamp(row['latest']).strftime("%Y-%m-%d")
+            print(f"  {row['project']}: {row['count']} memories (latest: {latest})")
+
+    return 0
+
+
+def cmd_sessions(args):
+    """List and browse sessions."""
+    config = get_config()
+    store = get_store(config)
+
+    conn = store.db.conn
+
+    if args.session_id:
+        # Show memories from a specific session
+        rows = conn.execute("""
+            SELECT id, content, type, importance, created_at
+            FROM memories
+            WHERE session_id = ? AND archived = 0
+            ORDER BY created_at ASC
+        """, (args.session_id,)).fetchall()
+
+        if not rows:
+            print(f"No memories found for session: {args.session_id}")
+            return 1
+
+        if args.format == 'json':
+            memories = [
+                {
+                    'id': row['id'],
+                    'content': row['content'],
+                    'type': row['type'],
+                    'importance': row['importance'],
+                    'created_at': row['created_at']
+                }
+                for row in rows
+            ]
+            print(json.dumps(memories, indent=2))
+        else:
+            print(f"Session: {args.session_id} ({len(rows)} memories)\n")
+            for row in rows:
+                from datetime import datetime
+                ts = datetime.fromtimestamp(row['created_at']).strftime("%H:%M:%S")
+                print(f"  [{row['id']}] {ts} ({row['type']}) {row['content'][:80]}...")
+    else:
+        # List all sessions
+        rows = conn.execute("""
+            SELECT session_id, COUNT(*) as count,
+                   MIN(created_at) as started,
+                   MAX(created_at) as ended
+            FROM memories
+            WHERE session_id IS NOT NULL AND archived = 0
+            GROUP BY session_id
+            ORDER BY started DESC
+            LIMIT ?
+        """, (args.limit,)).fetchall()
+
+        if not rows:
+            print("No sessions found")
+            return 0
+
+        if args.format == 'json':
+            sessions = [
+                {
+                    'session_id': row['session_id'],
+                    'count': row['count'],
+                    'started': row['started'],
+                    'ended': row['ended']
+                }
+                for row in rows
+            ]
+            print(json.dumps(sessions, indent=2))
+        else:
+            print("Recent sessions:")
+            for row in rows:
+                from datetime import datetime
+                started = datetime.fromtimestamp(row['started']).strftime("%Y-%m-%d %H:%M")
+                duration_mins = (row['ended'] - row['started']) / 60
+                print(f"  {row['session_id']}")
+                print(f"    {row['count']} memories, started {started}, ~{duration_mins:.0f}min")
+
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Local vector memory for AI assistants",
@@ -799,6 +942,24 @@ def main():
     p_tags = subparsers.add_parser("tags", help="List all tags in use")
     p_tags.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_tags.set_defaults(func=cmd_tags)
+
+    # restore
+    p_restore = subparsers.add_parser("restore", help="Restore database from backup")
+    p_restore.add_argument("file", help="Backup file to restore from")
+    p_restore.add_argument("--no-backup", action="store_true", help="Don't backup current database before restore")
+    p_restore.set_defaults(func=cmd_restore)
+
+    # projects
+    p_projects = subparsers.add_parser("projects", help="List all projects")
+    p_projects.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_projects.set_defaults(func=cmd_projects)
+
+    # sessions
+    p_sessions = subparsers.add_parser("sessions", help="List and browse sessions")
+    p_sessions.add_argument("session_id", nargs="?", help="View specific session")
+    p_sessions.add_argument("--limit", "-l", type=int, default=20, help="Number of sessions to show")
+    p_sessions.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_sessions.set_defaults(func=cmd_sessions)
 
     args = parser.parse_args()
 
