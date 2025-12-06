@@ -19,10 +19,13 @@ llama-memory solves this by using llama.cpp, which compiles to a single binary a
 - **Hybrid ranking** - Combines vector distance with importance, recency, and access patterns
 - **Duplicate detection** - Warns before storing similar content
 - **Session tracking** - Groups memories by conversation session
+- **Memory decay** - Auto-archives old conversational memories while protecting project knowledge
+- **Hierarchical memories** - Parent/child relationships for structured knowledge
+- **Conflict detection** - Identifies potentially contradicting memories
 - **Fully local** - No internet required after setup
 - **Lightweight** - ~21MB embedding model, <150KB sqlite-vec extension
-- **MCP server** - Works with Claude Code and any MCP client (17 tools)
-- **CLI tool** - Full command-line interface (28 commands)
+- **MCP server** - Works with Claude Code and any MCP client (34 tools)
+- **CLI tool** - Full command-line interface (46 commands)
 - **Python API** - Import and use directly
 - **Runs on Android** - Works in Termux with Snapdragon 8 Elite and similar hardware
 - **5-year retention** - Built for long-term memory with configurable retention policies
@@ -211,7 +214,7 @@ Add to your Claude Code settings (`~/.claude/settings.local.json`):
 }
 ```
 
-Then Claude Code will have access to these tools:
+Then Claude Code will have access to 34 memory tools:
 
 | Tool | Description |
 |------|-------------|
@@ -226,11 +229,29 @@ Then Claude Code will have access to these tools:
 | `memory_unarchive` | Restore archived memory |
 | `memory_stats` | Statistics |
 | `memory_export` | Export to JSON |
+| `memory_export_md` | Export to Markdown |
+| `memory_export_csv` | Export to CSV |
 | `memory_cleanup` | Archive expired memories |
 | `memory_recall` | Get context block for session start |
 | `memory_related` | Find related memories |
 | `memory_projects` | List all projects |
 | `memory_sessions` | List/browse sessions |
+| `memory_link` | Create link between memories |
+| `memory_unlink` | Remove link |
+| `memory_links` | Get links for a memory |
+| `memory_types` | List memory types |
+| `memory_count` | Count memories |
+| `memory_topics` | List/get/set topics |
+| `memory_merge` | Merge multiple memories |
+| `memory_children` | Get child memories |
+| `memory_parent` | Get/set parent memory |
+| `memory_confidence` | Set confidence level |
+| `memory_conflicts` | Check for conflicts |
+| `memory_decay` | Decay status and run |
+| `memory_protect` | Protect from decay |
+| `memory_tags` | List all tags |
+| `memory_history` | Memory access history |
+| `memory_search_history` | Search query patterns |
 
 ## Memory Types
 
@@ -254,6 +275,38 @@ Then Claude Code will have access to these tools:
 | `session` | Until cleanup | Working context |
 
 Run `llama-memory cleanup` periodically to archive expired memories.
+
+## Memory Decay
+
+The decay system automatically archives old, unused memories while protecting important knowledge:
+
+```bash
+# Check decay status
+llama-memory decay --status
+
+# Preview what would be archived
+llama-memory decay --dry-run
+
+# Run decay (archive old memories)
+llama-memory decay --run
+
+# Manually protect a memory
+llama-memory protect 42
+llama-memory protect 42 --remove  # remove protection
+```
+
+**Protected from decay:**
+- Memories with a project set
+- Memories with parent/child relationships
+- Types: entity, decision, procedure
+- Importance >= 7
+- Retention = permanent
+- Memories with links
+- Manually protected
+
+**Decay timeline:**
+- 120 days without access: starts affecting search ranking
+- 180 days without access: auto-archived (if not protected)
 
 ## Model Changes
 
@@ -289,13 +342,18 @@ This regenerates embeddings while preserving the original text.
 └── config.yaml        # Optional configuration overrides
 ```
 
-### Database Schema
+### Database Schema (v6)
 
-- `memories` - Main table with content, type, project, importance, retention
+- `memories` - Main table with content, type, project, importance, retention, confidence, parent_id, topic, protected
 - `memory_embeddings` - Vector embeddings (sqlite-vec virtual table)
 - `memories_fts` - Full-text search index (SQLite FTS5)
+- `memory_links` - Explicit relationships between memories (with weights)
 - `memory_log` - Audit log for debugging
-- `embedding_models` - Track model versions for migrations
+- `embedding_versions` - Track embeddings across model migrations
+- `search_history` - Query pattern tracking
+- `topics` - Topic definitions
+- `memory_conflicts` - Potential contradiction tracking
+- `meta` - System metadata (decay runs, etc.)
 
 ## Performance
 

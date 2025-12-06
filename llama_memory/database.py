@@ -12,7 +12,11 @@ from typing import Optional
 from datetime import datetime
 from .config import Config, get_config
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 6
+
+# Decay system constants
+DECAY_START_DAYS = 120  # Days without access before decay starts affecting ranking
+DECAY_ARCHIVE_DAYS = 180  # Days without access before auto-archive (for decayable memories)
 
 SCHEMA = """
 -- Main memories table
@@ -37,6 +41,18 @@ CREATE TABLE IF NOT EXISTS memories (
     embedding_model TEXT,
     session_id TEXT,  -- Track which session created this memory
 
+    -- v4 additions
+    source TEXT DEFAULT 'cli',  -- Where memory came from: cli, mcp, api, import, auto
+    metadata TEXT,  -- JSON blob for future extensibility
+
+    -- v5 additions
+    confidence REAL DEFAULT 1.0 CHECK (confidence >= 0.0 AND confidence <= 1.0),  -- How certain is this memory (0.0-1.0)
+    parent_id INTEGER REFERENCES memories(id),  -- Hierarchical parent memory
+    topic TEXT,  -- Auto-assigned topic/cluster
+
+    -- v6 additions
+    protected INTEGER DEFAULT 0,  -- Manually protected from decay (1 = protected)
+
     CONSTRAINT valid_type CHECK (type IN ('fact', 'decision', 'event', 'entity', 'context', 'procedure'))
 );
 
@@ -49,6 +65,9 @@ CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);
 CREATE INDEX IF NOT EXISTS idx_memories_retention ON memories(retention);
 CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by);
 CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);
+CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
+CREATE INDEX IF NOT EXISTS idx_memories_parent ON memories(parent_id);
+CREATE INDEX IF NOT EXISTS idx_memories_topic ON memories(topic);
 
 -- Full-text search on content
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -103,12 +122,76 @@ CREATE TABLE IF NOT EXISTS memory_links (
     target_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
     link_type TEXT DEFAULT 'related',  -- related, depends_on, contradicts, etc.
     note TEXT,  -- Optional note about the relationship
+    weight REAL DEFAULT 1.0,  -- Relationship strength (0.0-1.0)
+    metadata TEXT,  -- JSON blob for future extensibility
     created_at INTEGER NOT NULL,
     UNIQUE(source_id, target_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_links_source ON memory_links(source_id);
 CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id);
+
+-- Embedding versions table (for keeping old embeddings during migration)
+CREATE TABLE IF NOT EXISTS embedding_versions (
+    id INTEGER PRIMARY KEY,
+    memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    model_version TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    is_current INTEGER DEFAULT 1,
+    UNIQUE(memory_id, model_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_embedding_versions_memory ON embedding_versions(memory_id);
+CREATE INDEX IF NOT EXISTS idx_embedding_versions_model ON embedding_versions(model_version);
+CREATE INDEX IF NOT EXISTS idx_embedding_versions_current ON embedding_versions(is_current);
+
+-- v5: Search history for tracking query patterns
+CREATE TABLE IF NOT EXISTS search_history (
+    id INTEGER PRIMARY KEY,
+    query TEXT NOT NULL,
+    query_type TEXT DEFAULT 'semantic',  -- semantic, text, recall
+    result_count INTEGER,
+    top_result_id INTEGER REFERENCES memories(id),
+    session_id TEXT,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_history_query ON search_history(query);
+CREATE INDEX IF NOT EXISTS idx_search_history_created ON search_history(created_at);
+CREATE INDEX IF NOT EXISTS idx_search_history_session ON search_history(session_id);
+
+-- v5: Topics/clusters for automatic categorization
+CREATE TABLE IF NOT EXISTS topics (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    parent_topic_id INTEGER REFERENCES topics(id),
+    memory_count INTEGER DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_topics_name ON topics(name);
+CREATE INDEX IF NOT EXISTS idx_topics_parent ON topics(parent_topic_id);
+
+-- v5: Potential conflicts between memories
+CREATE TABLE IF NOT EXISTS memory_conflicts (
+    id INTEGER PRIMARY KEY,
+    memory1_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    memory2_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    conflict_type TEXT DEFAULT 'potential',  -- potential, confirmed, resolved
+    similarity REAL,  -- How similar the content is
+    note TEXT,
+    resolved_by INTEGER REFERENCES memories(id),  -- Which memory was chosen as correct
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    UNIQUE(memory1_id, memory2_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_conflicts_memory1 ON memory_conflicts(memory1_id);
+CREATE INDEX IF NOT EXISTS idx_conflicts_memory2 ON memory_conflicts(memory2_id);
+CREATE INDEX IF NOT EXISTS idx_conflicts_type ON memory_conflicts(conflict_type);
 """
 
 VECTOR_TABLE_SQL = """
@@ -195,6 +278,140 @@ class Database:
             except sqlite3.OperationalError as e:
                 if "already exists" not in str(e).lower():
                     raise
+
+        if current_version < 4:
+            # Migration v3 -> v4: Add source, metadata to memories; weight, metadata to links; embedding_versions table
+            try:
+                # Add source column to memories
+                conn.execute("ALTER TABLE memories ADD COLUMN source TEXT DEFAULT 'cli'")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+
+            try:
+                # Add metadata column to memories
+                conn.execute("ALTER TABLE memories ADD COLUMN metadata TEXT")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+
+            try:
+                # Add weight column to memory_links
+                conn.execute("ALTER TABLE memory_links ADD COLUMN weight REAL DEFAULT 1.0")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+
+            try:
+                # Add metadata column to memory_links
+                conn.execute("ALTER TABLE memory_links ADD COLUMN metadata TEXT")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+
+            # Create embedding_versions table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS embedding_versions (
+                    id INTEGER PRIMARY KEY,
+                    memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                    model_version TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    is_current INTEGER DEFAULT 1,
+                    UNIQUE(memory_id, model_version)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_embedding_versions_memory ON embedding_versions(memory_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_embedding_versions_model ON embedding_versions(model_version)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_embedding_versions_current ON embedding_versions(is_current)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source)")
+
+            conn.commit()
+
+        if current_version < 5:
+            # Migration v4 -> v5: Add confidence, parent_id, topic to memories; search_history, topics, memory_conflicts tables
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN confidence REAL DEFAULT 1.0")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN parent_id INTEGER REFERENCES memories(id)")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN topic TEXT")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_parent ON memories(parent_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_topic ON memories(topic)")
+
+            # Create search_history table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS search_history (
+                    id INTEGER PRIMARY KEY,
+                    query TEXT NOT NULL,
+                    query_type TEXT DEFAULT 'semantic',
+                    result_count INTEGER,
+                    top_result_id INTEGER REFERENCES memories(id),
+                    session_id TEXT,
+                    created_at INTEGER NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_search_history_query ON search_history(query)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_search_history_created ON search_history(created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_search_history_session ON search_history(session_id)")
+
+            # Create topics table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS topics (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    parent_topic_id INTEGER REFERENCES topics(id),
+                    memory_count INTEGER DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_topics_name ON topics(name)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_topics_parent ON topics(parent_topic_id)")
+
+            # Create memory_conflicts table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS memory_conflicts (
+                    id INTEGER PRIMARY KEY,
+                    memory1_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                    memory2_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                    conflict_type TEXT DEFAULT 'potential',
+                    similarity REAL,
+                    note TEXT,
+                    resolved_by INTEGER REFERENCES memories(id),
+                    created_at INTEGER NOT NULL,
+                    resolved_at INTEGER,
+                    UNIQUE(memory1_id, memory2_id)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_conflicts_memory1 ON memory_conflicts(memory1_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_conflicts_memory2 ON memory_conflicts(memory2_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_conflicts_type ON memory_conflicts(conflict_type)")
+
+            conn.commit()
+
+        if current_version < 6:
+            # Migration v5 -> v6: Add protected column for decay system
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN protected INTEGER DEFAULT 0")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+
+            conn.commit()
 
     def initialize(self):
         """Initialize database schema."""

@@ -942,9 +942,11 @@ def cmd_link(args):
             target_id=args.target,
             link_type=args.type,
             note=args.note,
+            weight=args.weight,
         )
         if created:
-            print(f"Linked memory {args.source} -> {args.target} ({args.type})")
+            weight_str = f" weight={args.weight}" if args.weight != 1.0 else ""
+            print(f"Linked memory {args.source} -> {args.target} ({args.type}{weight_str})")
         else:
             print(f"Link already exists between {args.source} and {args.target}")
     except ValueError as e:
@@ -991,7 +993,8 @@ def cmd_links(args):
             for link in links:
                 direction = "->" if link['direction'] == 'outgoing' else "<-"
                 note = f" ({link['note']})" if link['note'] else ""
-                print(f"  {direction} [{link['linked_id']}] {link['link_type']}{note}")
+                weight_str = f" [{link['weight']:.1f}]" if link.get('weight', 1.0) != 1.0 else ""
+                print(f"  {direction} [{link['linked_id']}] {link['link_type']}{weight_str}{note}")
                 print(f"     {link['content'][:70]}...")
 
     return 0
@@ -1022,6 +1025,337 @@ def cmd_types(args):
         print("Memory types:")
         for row in rows:
             print(f"  {row['type']}: {row['count']}")
+
+    return 0
+
+
+# ========== v2.0 Commands ==========
+
+def cmd_topics(args):
+    """List or manage topics."""
+    config = get_config()
+    store = get_store(config)
+
+    if args.set:
+        # Set topic for a memory
+        memory_id = int(args.set[0])
+        topic = args.set[1]
+        if store.set_topic(memory_id, topic):
+            print(f"Set topic '{topic}' for memory {memory_id}")
+        else:
+            print(f"Memory {memory_id} not found")
+            return 1
+    elif args.get:
+        # Get memories by topic
+        mems = store.get_by_topic(args.get, limit=args.limit)
+        if args.format == 'json':
+            print(json.dumps([m.to_dict() for m in mems], indent=2))
+        else:
+            print(f"Memories with topic '{args.get}':")
+            for m in mems:
+                print(f"  [{m.id}] {m.content[:80]}...")
+    else:
+        # List all topics
+        topics = store.get_topics()
+        if args.format == 'json':
+            print(json.dumps(topics, indent=2))
+        else:
+            if not topics:
+                print("No topics found")
+            else:
+                print("Topics:")
+                for t in topics:
+                    print(f"  {t['topic']}: {t['count']} memories")
+
+    return 0
+
+
+def cmd_merge(args):
+    """Merge multiple memories into one."""
+    config = get_config()
+    store = get_store(config)
+
+    try:
+        merged_id = store.merge(
+            source_ids=args.ids,
+            merged_content=args.content,
+            archive_sources=args.archive,
+        )
+        print(f"Created merged memory {merged_id} from {args.ids}")
+        if args.archive:
+            print("Source memories archived")
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+    return 0
+
+
+def cmd_children(args):
+    """List child memories of a parent."""
+    config = get_config()
+    store = get_store(config)
+
+    children = store.get_children(args.id)
+
+    if args.format == 'json':
+        print(json.dumps([c.to_dict() for c in children], indent=2))
+    else:
+        if not children:
+            print(f"No children for memory {args.id}")
+        else:
+            print(f"Children of memory {args.id}:")
+            for c in children:
+                print(f"  [{c.id}] ({c.type}) {c.content[:80]}...")
+
+    return 0
+
+
+def cmd_parent(args):
+    """Set or show parent of a memory."""
+    config = get_config()
+    store = get_store(config)
+
+    if args.set is not None:
+        parent_id = args.set if args.set > 0 else None
+        try:
+            if store.set_parent(args.id, parent_id):
+                if parent_id:
+                    print(f"Set parent of memory {args.id} to {parent_id}")
+                else:
+                    print(f"Removed parent from memory {args.id}")
+            else:
+                print(f"Memory {args.id} not found")
+                return 1
+        except ValueError as e:
+            print(f"Error: {e}")
+            return 1
+    else:
+        # Show ancestors
+        ancestors = store.get_ancestors(args.id)
+        if not ancestors:
+            print(f"Memory {args.id} has no parent")
+        else:
+            print(f"Ancestors of memory {args.id}:")
+            for i, a in enumerate(ancestors):
+                indent = "  " * (i + 1)
+                print(f"{indent}[{a.id}] {a.content[:60]}...")
+
+    return 0
+
+
+def cmd_confidence(args):
+    """Set confidence level for a memory."""
+    config = get_config()
+    store = get_store(config)
+
+    try:
+        if store.set_confidence(args.id, args.value):
+            print(f"Set confidence of memory {args.id} to {args.value:.0%}")
+        else:
+            print(f"Memory {args.id} not found")
+            return 1
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+    return 0
+
+
+def cmd_conflicts(args):
+    """Check or list memory conflicts."""
+    config = get_config()
+    store = get_store(config)
+
+    if args.check:
+        # Check conflicts for a specific memory
+        conflicts = store.check_conflicts(args.check, threshold=args.threshold)
+        if args.format == 'json':
+            print(json.dumps(conflicts, indent=2))
+        else:
+            if not conflicts:
+                print(f"No potential conflicts found for memory {args.check}")
+            else:
+                print(f"Potential conflicts for memory {args.check}:")
+                for c in conflicts:
+                    print(f"  [{c['memory_id']}] similarity={c['similarity']:.1%}")
+                    print(f"    {c['content'][:100]}...")
+    elif args.resolve:
+        # Resolve a conflict
+        if store.resolve_conflict(args.resolve[0], args.resolve[1], note=args.note):
+            print(f"Resolved conflict {args.resolve[0]} with memory {args.resolve[1]}")
+        else:
+            print(f"Conflict {args.resolve[0]} not found")
+            return 1
+    else:
+        # List all conflicts
+        conflicts = store.get_conflicts(conflict_type=args.type)
+        if args.format == 'json':
+            print(json.dumps(conflicts, indent=2))
+        else:
+            if not conflicts:
+                print("No conflicts found")
+            else:
+                print("Memory conflicts:")
+                for c in conflicts:
+                    status = f"[{c['conflict_type']}]"
+                    print(f"  {status} {c['memory1_id']} <-> {c['memory2_id']} (sim={c['similarity']:.1%})")
+
+    return 0
+
+
+def cmd_search_history(args):
+    """Show search history."""
+    config = get_config()
+    store = get_store(config)
+
+    if args.popular:
+        queries = store.get_popular_queries(limit=args.limit)
+        if args.format == 'json':
+            print(json.dumps(queries, indent=2))
+        else:
+            print("Popular queries:")
+            for q in queries:
+                print(f"  {q['count']}x: {q['query']}")
+    else:
+        history = store.get_search_history(limit=args.limit, session_id=args.session)
+        if args.format == 'json':
+            print(json.dumps(history, indent=2))
+        else:
+            print("Search history:")
+            for h in history:
+                from datetime import datetime
+                ts = datetime.fromtimestamp(h['created_at']).strftime('%Y-%m-%d %H:%M')
+                print(f"  [{ts}] {h['query']} ({h['result_count']} results)")
+
+    return 0
+
+
+def cmd_export_md(args):
+    """Export memories as Markdown."""
+    config = get_config()
+    store = get_store(config)
+
+    md = store.export_markdown(include_archived=args.archived)
+
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(md)
+        print(f"Exported to {args.output}")
+    else:
+        print(md)
+
+    return 0
+
+
+def cmd_export_csv(args):
+    """Export memories as CSV."""
+    config = get_config()
+    store = get_store(config)
+
+    csv_out = store.export_csv(include_archived=args.archived)
+
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(csv_out)
+        print(f"Exported to {args.output}")
+    else:
+        print(csv_out)
+
+    return 0
+
+
+# ========== v2.1 Decay Commands ==========
+
+def cmd_decay(args):
+    """Run decay process or check status."""
+    config = get_config()
+    store = get_store(config)
+
+    from llama_memory.database import DECAY_START_DAYS, DECAY_ARCHIVE_DAYS
+
+    if args.status:
+        # Show decay status for a specific memory
+        status = store.get_decay_status(args.status)
+        if args.format == 'json':
+            print(json.dumps(status, indent=2))
+        else:
+            if 'error' in status:
+                print(f"Error: {status['error']}")
+                return 1
+            print(f"Decay status for memory {args.status}:")
+            print(f"  Protected: {'Yes' if status['protected'] else 'No'}")
+            if status['protection_reasons']:
+                print(f"  Reasons: {', '.join(status['protection_reasons'])}")
+            print(f"  Days since access: {status['days_since_access']}")
+            print(f"  Decay starts at: {DECAY_START_DAYS} days")
+            print(f"  Auto-archive at: {DECAY_ARCHIVE_DAYS} days")
+            if status['in_decay_window']:
+                print(f"  Status: IN DECAY WINDOW (ranking reduced)")
+            elif status['will_decay']:
+                print(f"  Status: WILL BE ARCHIVED on next decay run")
+            elif status['protected']:
+                print(f"  Status: Protected from decay")
+            else:
+                print(f"  Status: Safe (accessed recently)")
+    elif args.run:
+        # Run decay process
+        result = store.run_decay(dry_run=args.dry_run)
+        if args.format == 'json':
+            print(json.dumps(result, indent=2))
+        else:
+            if args.dry_run:
+                print(f"DRY RUN - Would archive {len(result['candidates'])} memories:")
+            else:
+                print(f"Archived {result['archived']} memories:")
+            for c in result['candidates']:
+                from datetime import datetime
+                last = datetime.fromtimestamp(c['last_access']).strftime('%Y-%m-%d')
+                print(f"  [{c['id']}] ({c['type']}) last accessed {last}")
+                print(f"    {c['content']}...")
+    else:
+        # Show decay overview
+        last_run = store.get_last_decay_run()
+        candidates = store.get_decay_candidates()
+
+        if args.format == 'json':
+            print(json.dumps({
+                'last_run': last_run,
+                'decay_start_days': DECAY_START_DAYS,
+                'decay_archive_days': DECAY_ARCHIVE_DAYS,
+                'candidates_count': len(candidates),
+            }, indent=2))
+        else:
+            print("Decay System Status:")
+            print(f"  Decay starts after: {DECAY_START_DAYS} days without access")
+            print(f"  Auto-archive after: {DECAY_ARCHIVE_DAYS} days without access")
+            if last_run:
+                from datetime import datetime
+                print(f"  Last decay run: {datetime.fromtimestamp(last_run).strftime('%Y-%m-%d %H:%M')}")
+            else:
+                print("  Last decay run: Never")
+            print(f"  Candidates for archive: {len(candidates)}")
+            if candidates:
+                print("\n  Run 'llama-memory decay --run --dry-run' to preview")
+                print("  Run 'llama-memory decay --run' to archive them")
+
+    return 0
+
+
+def cmd_protect(args):
+    """Protect or unprotect a memory from decay."""
+    config = get_config()
+    store = get_store(config)
+
+    protected = not args.remove
+    if store.set_protected(args.id, protected):
+        if protected:
+            print(f"Memory {args.id} is now protected from decay")
+        else:
+            print(f"Memory {args.id} protection removed (may decay if not otherwise protected)")
+    else:
+        print(f"Memory {args.id} not found")
+        return 1
 
     return 0
 
@@ -1320,6 +1654,8 @@ def main():
     p_link.add_argument("--type", "-t", default="related",
                         help="Link type (related, depends_on, contradicts, etc.)")
     p_link.add_argument("--note", "-n", help="Note about the relationship")
+    p_link.add_argument("--weight", "-w", type=float, default=1.0,
+                        help="Relationship strength 0.0-1.0 (default: 1.0)")
     p_link.set_defaults(func=cmd_link)
 
     # unlink
@@ -1338,6 +1674,88 @@ def main():
     p_types = subparsers.add_parser("types", help="List memory types in use")
     p_types.add_argument("--format", "-f", choices=["text", "json"], default="text")
     p_types.set_defaults(func=cmd_types)
+
+    # ========== v2.0 Commands ==========
+
+    # topics
+    p_topics = subparsers.add_parser("topics", help="List or manage topics")
+    p_topics.add_argument("--set", nargs=2, metavar=("ID", "TOPIC"), help="Set topic for memory")
+    p_topics.add_argument("--get", metavar="TOPIC", help="Get memories by topic")
+    p_topics.add_argument("--limit", "-l", type=int, default=50, help="Limit results")
+    p_topics.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_topics.set_defaults(func=cmd_topics)
+
+    # merge
+    p_merge = subparsers.add_parser("merge", help="Merge multiple memories into one")
+    p_merge.add_argument("ids", type=int, nargs="+", help="Memory IDs to merge")
+    p_merge.add_argument("--content", "-c", required=True, help="Content for merged memory")
+    p_merge.add_argument("--archive", "-a", action="store_true", help="Archive source memories")
+    p_merge.set_defaults(func=cmd_merge)
+
+    # children
+    p_children = subparsers.add_parser("children", help="List child memories of a parent")
+    p_children.add_argument("id", type=int, help="Parent memory ID")
+    p_children.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_children.set_defaults(func=cmd_children)
+
+    # parent
+    p_parent = subparsers.add_parser("parent", help="Set or show parent of a memory")
+    p_parent.add_argument("id", type=int, help="Memory ID")
+    p_parent.add_argument("--set", type=int, metavar="PARENT_ID", help="Set parent (0 to remove)")
+    p_parent.set_defaults(func=cmd_parent)
+
+    # confidence
+    p_conf = subparsers.add_parser("confidence", help="Set confidence level for a memory")
+    p_conf.add_argument("id", type=int, help="Memory ID")
+    p_conf.add_argument("value", type=float, help="Confidence value (0.0-1.0)")
+    p_conf.set_defaults(func=cmd_confidence)
+
+    # conflicts
+    p_conflicts = subparsers.add_parser("conflicts", help="Check or list memory conflicts")
+    p_conflicts.add_argument("--check", type=int, metavar="ID", help="Check conflicts for memory")
+    p_conflicts.add_argument("--resolve", nargs=2, type=int, metavar=("CONFLICT_ID", "WINNER_ID"),
+                             help="Resolve conflict with winning memory")
+    p_conflicts.add_argument("--threshold", type=float, default=0.7, help="Similarity threshold")
+    p_conflicts.add_argument("--type", choices=["potential", "confirmed", "resolved"], help="Filter by type")
+    p_conflicts.add_argument("--note", help="Note when resolving")
+    p_conflicts.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_conflicts.set_defaults(func=cmd_conflicts)
+
+    # search-history
+    p_shist = subparsers.add_parser("search-history", help="Show search history")
+    p_shist.add_argument("--popular", "-p", action="store_true", help="Show popular queries")
+    p_shist.add_argument("--session", help="Filter by session ID")
+    p_shist.add_argument("--limit", "-l", type=int, default=20)
+    p_shist.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_shist.set_defaults(func=cmd_search_history)
+
+    # export-md
+    p_expmd = subparsers.add_parser("export-md", help="Export memories as Markdown")
+    p_expmd.add_argument("--output", "-o", help="Output file (stdout if not specified)")
+    p_expmd.add_argument("--archived", "-a", action="store_true", help="Include archived")
+    p_expmd.set_defaults(func=cmd_export_md)
+
+    # export-csv
+    p_expcsv = subparsers.add_parser("export-csv", help="Export memories as CSV")
+    p_expcsv.add_argument("--output", "-o", help="Output file (stdout if not specified)")
+    p_expcsv.add_argument("--archived", "-a", action="store_true", help="Include archived")
+    p_expcsv.set_defaults(func=cmd_export_csv)
+
+    # ========== v2.1 Decay Commands ==========
+
+    # decay
+    p_decay = subparsers.add_parser("decay", help="Manage memory decay/aging")
+    p_decay.add_argument("--status", type=int, metavar="ID", help="Check decay status for memory")
+    p_decay.add_argument("--run", action="store_true", help="Run decay process")
+    p_decay.add_argument("--dry-run", action="store_true", help="Preview without archiving")
+    p_decay.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_decay.set_defaults(func=cmd_decay)
+
+    # protect
+    p_protect = subparsers.add_parser("protect", help="Protect a memory from decay")
+    p_protect.add_argument("id", type=int, help="Memory ID")
+    p_protect.add_argument("--remove", "-r", action="store_true", help="Remove protection")
+    p_protect.set_defaults(func=cmd_protect)
 
     args = parser.parse_args()
 

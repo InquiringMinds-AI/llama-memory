@@ -81,6 +81,10 @@ TOOLS = [
                     "type": "boolean",
                     "description": "Store even if duplicate detected",
                     "default": False
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Additional metadata to store with the memory (JSON object)"
                 }
             },
             "required": ["content"]
@@ -404,6 +408,17 @@ TOOLS = [
                 "note": {
                     "type": "string",
                     "description": "Optional note about the relationship"
+                },
+                "weight": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "Relationship strength (0.0-1.0, default 1.0)",
+                    "default": 1.0
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Additional metadata for the link (JSON object)"
                 }
             },
             "required": ["source_id", "target_id"]
@@ -474,6 +489,248 @@ TOOLS = [
                 }
             }
         }
+    },
+    # ========== v2.0 Tools ==========
+    {
+        "name": "memory_topics",
+        "description": "List all topics or get/set topic for a memory.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "get", "set"],
+                    "description": "Action: list all topics, get memories by topic, or set topic for memory",
+                    "default": "list"
+                },
+                "topic": {
+                    "type": "string",
+                    "description": "Topic name (for get/set)"
+                },
+                "memory_id": {
+                    "type": "integer",
+                    "description": "Memory ID (for set)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 50
+                }
+            }
+        }
+    },
+    {
+        "name": "memory_merge",
+        "description": "Merge multiple memories into one new memory.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Memory IDs to merge (at least 2)"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content for the merged memory"
+                },
+                "archive_sources": {
+                    "type": "boolean",
+                    "description": "Archive the source memories after merging",
+                    "default": False
+                }
+            },
+            "required": ["ids", "content"]
+        }
+    },
+    {
+        "name": "memory_children",
+        "description": "Get child memories of a parent memory.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "Parent memory ID"
+                }
+            },
+            "required": ["id"]
+        }
+    },
+    {
+        "name": "memory_parent",
+        "description": "Get ancestors or set parent of a memory.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "Memory ID"
+                },
+                "set_parent": {
+                    "type": "integer",
+                    "description": "Parent ID to set (0 or omit to just get ancestors)"
+                }
+            },
+            "required": ["id"]
+        }
+    },
+    {
+        "name": "memory_confidence",
+        "description": "Set confidence level for a memory.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "Memory ID"
+                },
+                "confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "Confidence level (0.0-1.0)"
+                }
+            },
+            "required": ["id", "confidence"]
+        }
+    },
+    {
+        "name": "memory_conflicts",
+        "description": "Check for or list memory conflicts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "check_id": {
+                    "type": "integer",
+                    "description": "Memory ID to check for conflicts"
+                },
+                "threshold": {
+                    "type": "number",
+                    "description": "Similarity threshold for conflict detection",
+                    "default": 0.7
+                },
+                "conflict_type": {
+                    "type": "string",
+                    "enum": ["potential", "confirmed", "resolved"],
+                    "description": "Filter by conflict type when listing"
+                }
+            }
+        }
+    },
+    {
+        "name": "memory_export_md",
+        "description": "Export all memories as Markdown.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "include_archived": {
+                    "type": "boolean",
+                    "default": False
+                }
+            }
+        }
+    },
+    {
+        "name": "memory_export_csv",
+        "description": "Export all memories as CSV.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "include_archived": {
+                    "type": "boolean",
+                    "default": False
+                }
+            }
+        }
+    },
+    # ========== v2.1 Tools ==========
+    {
+        "name": "memory_decay",
+        "description": "Check decay status or run decay process to archive old, unused memories.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["status", "check", "run"],
+                    "description": "status=system overview, check=check specific memory, run=execute decay",
+                    "default": "status"
+                },
+                "memory_id": {
+                    "type": "integer",
+                    "description": "Memory ID (for check action)"
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Preview without archiving (for run action)",
+                    "default": True
+                }
+            }
+        }
+    },
+    {
+        "name": "memory_protect",
+        "description": "Manually protect or unprotect a memory from decay.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "Memory ID"
+                },
+                "protected": {
+                    "type": "boolean",
+                    "description": "True to protect, False to remove protection",
+                    "default": True
+                }
+            },
+            "required": ["id"]
+        }
+    },
+    {
+        "name": "memory_tags",
+        "description": "List all tags in use with memory counts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
+        "name": "memory_history",
+        "description": "Get access/modification history for a specific memory.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "Memory ID"
+                }
+            },
+            "required": ["id"]
+        }
+    },
+    {
+        "name": "memory_search_history",
+        "description": "Get search history and popular queries.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["recent", "popular"],
+                    "description": "recent=recent searches, popular=most frequent queries",
+                    "default": "recent"
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 20
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Filter by session (for recent action)"
+                }
+            }
+        }
     }
 ]
 
@@ -515,6 +772,8 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
                 tags=args.get("tags", []),
                 retention=args.get("retention", "long-term"),
                 force=args.get("force", False),
+                source='mcp',
+                metadata=args.get("metadata"),
             )
             if memory_id == -1 and duplicate:
                 result_text = f"Duplicate detected! Similar memory exists (ID: {duplicate.existing_id}, similarity: {duplicate.similarity:.1%}). Use force=true to store anyway."
@@ -762,6 +1021,8 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
                     target_id=args["target_id"],
                     link_type=args.get("link_type", "related"),
                     note=args.get("note"),
+                    weight=args.get("weight", 1.0),
+                    metadata=args.get("metadata"),
                 )
                 if created:
                     result_text = f"Linked memory {args['source_id']} -> {args['target_id']}"
@@ -815,6 +1076,141 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
 
             row = conn.execute(sql, params).fetchone()
             result_text = str(row['cnt'])
+
+        # ========== v2.0 Tool Handlers ==========
+
+        elif tool_name == "memory_topics":
+            action = args.get("action", "list")
+            if action == "list":
+                topics = store.get_topics()
+                result_text = json.dumps(topics, indent=2)
+            elif action == "get":
+                topic = args.get("topic")
+                if not topic:
+                    result_text = "Error: topic required for get action"
+                else:
+                    mems = store.get_by_topic(topic, limit=args.get("limit", 50))
+                    result_text = json.dumps([m.to_dict() for m in mems], indent=2)
+            elif action == "set":
+                memory_id = args.get("memory_id")
+                topic = args.get("topic")
+                if not memory_id or not topic:
+                    result_text = "Error: memory_id and topic required for set action"
+                else:
+                    if store.set_topic(memory_id, topic):
+                        result_text = f"Set topic '{topic}' for memory {memory_id}"
+                    else:
+                        result_text = f"Memory {memory_id} not found"
+
+        elif tool_name == "memory_merge":
+            try:
+                merged_id = store.merge(
+                    source_ids=args["ids"],
+                    merged_content=args["content"],
+                    archive_sources=args.get("archive_sources", False),
+                )
+                result_text = f"Created merged memory {merged_id} from {args['ids']}"
+            except ValueError as e:
+                result_text = f"Error: {e}"
+
+        elif tool_name == "memory_children":
+            children = store.get_children(args["id"])
+            result_text = json.dumps([c.to_dict() for c in children], indent=2)
+
+        elif tool_name == "memory_parent":
+            if "set_parent" in args:
+                parent_id = args["set_parent"] if args["set_parent"] > 0 else None
+                try:
+                    if store.set_parent(args["id"], parent_id):
+                        if parent_id:
+                            result_text = f"Set parent of memory {args['id']} to {parent_id}"
+                        else:
+                            result_text = f"Removed parent from memory {args['id']}"
+                    else:
+                        result_text = f"Memory {args['id']} not found"
+                except ValueError as e:
+                    result_text = f"Error: {e}"
+            else:
+                ancestors = store.get_ancestors(args["id"])
+                result_text = json.dumps([a.to_dict() for a in ancestors], indent=2)
+
+        elif tool_name == "memory_confidence":
+            try:
+                if store.set_confidence(args["id"], args["confidence"]):
+                    result_text = f"Set confidence of memory {args['id']} to {args['confidence']}"
+                else:
+                    result_text = f"Memory {args['id']} not found"
+            except ValueError as e:
+                result_text = f"Error: {e}"
+
+        elif tool_name == "memory_conflicts":
+            if args.get("check_id"):
+                conflicts = store.check_conflicts(args["check_id"], threshold=args.get("threshold", 0.7))
+                result_text = json.dumps(conflicts, indent=2)
+            else:
+                conflicts = store.get_conflicts(conflict_type=args.get("conflict_type"))
+                result_text = json.dumps(conflicts, indent=2)
+
+        elif tool_name == "memory_export_md":
+            result_text = store.export_markdown(include_archived=args.get("include_archived", False))
+
+        elif tool_name == "memory_export_csv":
+            result_text = store.export_csv(include_archived=args.get("include_archived", False))
+
+        # ========== v2.1 Tool Handlers ==========
+
+        elif tool_name == "memory_decay":
+            from .database import DECAY_START_DAYS, DECAY_ARCHIVE_DAYS
+            action = args.get("action", "status")
+
+            if action == "status":
+                last_run = store.get_last_decay_run()
+                candidates = store.get_decay_candidates()
+                result_text = json.dumps({
+                    "decay_start_days": DECAY_START_DAYS,
+                    "decay_archive_days": DECAY_ARCHIVE_DAYS,
+                    "last_run": last_run,
+                    "candidates_count": len(candidates),
+                }, indent=2)
+            elif action == "check":
+                memory_id = args.get("memory_id")
+                if not memory_id:
+                    result_text = "Error: memory_id required for check action"
+                else:
+                    status = store.get_decay_status(memory_id)
+                    result_text = json.dumps(status, indent=2)
+            elif action == "run":
+                dry_run = args.get("dry_run", True)
+                result = store.run_decay(dry_run=dry_run)
+                result_text = json.dumps(result, indent=2)
+
+        elif tool_name == "memory_protect":
+            protected = args.get("protected", True)
+            if store.set_protected(args["id"], protected):
+                if protected:
+                    result_text = f"Memory {args['id']} is now protected from decay"
+                else:
+                    result_text = f"Memory {args['id']} protection removed"
+            else:
+                result_text = f"Memory {args['id']} not found"
+
+        elif tool_name == "memory_tags":
+            tags = store.get_tags()
+            result_text = json.dumps(tags, indent=2)
+
+        elif tool_name == "memory_history":
+            history = store.get_access_history(args["id"])
+            result_text = json.dumps(history, indent=2)
+
+        elif tool_name == "memory_search_history":
+            action = args.get("action", "recent")
+            limit = args.get("limit", 20)
+            if action == "recent":
+                history = store.get_search_history(limit=limit, session_id=args.get("session_id"))
+                result_text = json.dumps(history, indent=2)
+            else:  # popular
+                popular = store.get_popular_queries(limit=limit)
+                result_text = json.dumps(popular, indent=2)
 
         else:
             send_response(id, error={"code": -32601, "message": f"Unknown tool: {tool_name}"})
