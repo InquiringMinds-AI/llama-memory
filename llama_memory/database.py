@@ -12,7 +12,7 @@ from typing import Optional
 from datetime import datetime
 from .config import Config, get_config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 -- Main memories table
@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS memories (
     archived INTEGER DEFAULT 0,
 
     embedding_model TEXT,
+    session_id TEXT,  -- Track which session created this memory
 
     CONSTRAINT valid_type CHECK (type IN ('fact', 'decision', 'event', 'entity', 'context', 'procedure'))
 );
@@ -47,6 +48,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(archived);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);
 CREATE INDEX IF NOT EXISTS idx_memories_retention ON memories(retention);
 CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by);
+CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);
 
 -- Full-text search on content
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -144,11 +146,39 @@ class Database:
             self._conn.close()
             self._conn = None
 
+    def migrate(self):
+        """Run any pending migrations."""
+        current_version = self.get_schema_version()
+        conn = self.conn
+
+        if current_version < 2:
+            # Migration v1 -> v2: Add session_id column
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN session_id TEXT")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id)")
+                conn.commit()
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+
     def initialize(self):
         """Initialize database schema."""
         conn = self.conn
 
-        # Create main schema
+        # Check if this is an existing database that needs migration
+        needs_migration = False
+        try:
+            result = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='memories'").fetchone()
+            if result:
+                needs_migration = True
+        except:
+            pass
+
+        # Run migrations first for existing databases
+        if needs_migration:
+            self.migrate()
+
+        # Create main schema (will skip existing tables due to IF NOT EXISTS)
         conn.executescript(SCHEMA)
 
         # Create vector table with correct dimensions

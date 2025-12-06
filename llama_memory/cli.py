@@ -38,7 +38,7 @@ def cmd_store(args):
 
     tags = args.tag if args.tag else []
 
-    memory_id = store.store(
+    memory_id, duplicate = store.store(
         content=args.content,
         type=args.type,
         project=args.project,
@@ -46,8 +46,21 @@ def cmd_store(args):
         tags=tags,
         summary=args.summary,
         retention=args.retention,
+        force=args.force,
     )
-    print(f"Stored memory {memory_id}")
+
+    if memory_id == -1 and duplicate:
+        print(f"Duplicate detected! Similar memory exists:")
+        print(f"  ID: {duplicate.existing_id}")
+        print(f"  Similarity: {duplicate.similarity:.1%}")
+        print(f"  Content: {duplicate.existing_content[:150]}...")
+        print(f"\nUse --force to store anyway, or 'supersede {duplicate.existing_id}' to update.")
+        return 1
+
+    if duplicate:
+        print(f"Stored memory {memory_id} (note: similar to #{duplicate.existing_id})")
+    else:
+        print(f"Stored memory {memory_id}")
     return 0
 
 
@@ -61,16 +74,21 @@ def cmd_search(args):
         limit=args.limit,
         type=args.type,
         project=args.project,
+        session_id=args.session,
         min_importance=args.min_importance,
+        hybrid_ranking=not args.no_hybrid,
     )
 
     if args.format == 'json':
         print(json.dumps([m.to_dict() for m in results], indent=2))
     else:
         for m in results:
-            print(f"\n[{m.id}] ({m.type}) importance={m.importance} distance={m.distance:.4f}")
+            score_str = f"score={m.score:.4f}" if m.score is not None else f"distance={m.distance:.4f}"
+            print(f"\n[{m.id}] ({m.type}) importance={m.importance} {score_str}")
             if m.project:
                 print(f"    project: {m.project}")
+            if m.session_id:
+                print(f"    session: {m.session_id}")
             print(f"    {m.content[:200]}{'...' if len(m.content) > 200 else ''}")
     return 0
 
@@ -309,6 +327,7 @@ def main():
     p_store.add_argument("--summary", "-s", help="Brief summary")
     p_store.add_argument("--retention", "-r", default="long-term",
                          choices=["permanent", "long-term", "medium", "short", "session"])
+    p_store.add_argument("--force", action="store_true", help="Store even if duplicate detected")
     p_store.set_defaults(func=cmd_store)
 
     # search
@@ -317,7 +336,9 @@ def main():
     p_search.add_argument("--limit", "-l", type=int, default=10)
     p_search.add_argument("--type", "-t")
     p_search.add_argument("--project", "-p")
+    p_search.add_argument("--session", help="Filter by session ID")
     p_search.add_argument("--min-importance", type=int)
+    p_search.add_argument("--no-hybrid", action="store_true", help="Disable hybrid ranking (use raw distance)")
     p_search.add_argument("--format", "-f", choices=["text", "json"], default="json")
     p_search.set_defaults(func=cmd_search)
 

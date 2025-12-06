@@ -37,7 +37,7 @@ def send_notification(method: str, params: Any = None):
 TOOLS = [
     {
         "name": "memory_store",
-        "description": "Store a new memory with semantic embedding. Use this to remember facts, decisions, events, or any information that should persist across sessions.",
+        "description": "Store a new memory with semantic embedding. Use this to remember facts, decisions, events, or any information that should persist across sessions. Automatically detects duplicates.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -76,6 +76,11 @@ TOOLS = [
                     "enum": ["permanent", "long-term", "medium", "short", "session"],
                     "description": "How long to keep. permanent=forever, long-term=5yr, medium=1yr, short=30d",
                     "default": "long-term"
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "Store even if duplicate detected",
+                    "default": False
                 }
             },
             "required": ["content"]
@@ -83,7 +88,7 @@ TOOLS = [
     },
     {
         "name": "memory_search",
-        "description": "Search memories by semantic similarity. Finds related memories even if exact words don't match.",
+        "description": "Search memories by semantic similarity with hybrid ranking. Combines vector distance with importance, recency, and access patterns.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -105,11 +110,20 @@ TOOLS = [
                     "type": "string",
                     "description": "Filter by project (also includes global memories)"
                 },
+                "session_id": {
+                    "type": "string",
+                    "description": "Filter by session ID to see memories from a specific session"
+                },
                 "min_importance": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 10,
                     "description": "Only return memories with at least this importance"
+                },
+                "hybrid_ranking": {
+                    "type": "boolean",
+                    "description": "Use hybrid ranking (distance + importance + recency + access). Default true.",
+                    "default": True
                 }
             },
             "required": ["query"]
@@ -311,7 +325,7 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
         result_text = ""
 
         if tool_name == "memory_store":
-            memory_id = store.store(
+            memory_id, duplicate = store.store(
                 content=args["content"],
                 type=args.get("type", "fact"),
                 summary=args.get("summary"),
@@ -319,8 +333,14 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
                 importance=args.get("importance", 5),
                 tags=args.get("tags", []),
                 retention=args.get("retention", "long-term"),
+                force=args.get("force", False),
             )
-            result_text = f"Stored memory with ID {memory_id}"
+            if memory_id == -1 and duplicate:
+                result_text = f"Duplicate detected! Similar memory exists (ID: {duplicate.existing_id}, similarity: {duplicate.similarity:.1%}). Use force=true to store anyway."
+            elif duplicate:
+                result_text = f"Stored memory with ID {memory_id} (note: similar to #{duplicate.existing_id})"
+            else:
+                result_text = f"Stored memory with ID {memory_id}"
 
         elif tool_name == "memory_search":
             results = store.search(
@@ -328,7 +348,9 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
                 limit=args.get("limit", 10),
                 type=args.get("type"),
                 project=args.get("project"),
+                session_id=args.get("session_id"),
                 min_importance=args.get("min_importance"),
+                hybrid_ranking=args.get("hybrid_ranking", True),
             )
             result_text = json.dumps([m.to_dict() for m in results], indent=2)
 

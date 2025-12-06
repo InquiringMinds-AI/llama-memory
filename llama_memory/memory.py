@@ -5,9 +5,11 @@ Core memory operations for llama-memory.
 from __future__ import annotations
 
 import json
-from typing import Optional, Literal
+import os
+import math
+from typing import Optional, Literal, Tuple
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .config import Config, get_config
 from .database import Database, get_database, embedding_to_blob
@@ -15,6 +17,21 @@ from .embeddings import get_embedding
 
 MemoryType = Literal['fact', 'decision', 'event', 'entity', 'context', 'procedure']
 Retention = Literal['permanent', 'long-term', 'medium', 'short', 'session']
+
+# Similarity threshold for duplicate detection (lower distance = more similar)
+# 0.5 catches near-duplicates, 0.7 catches paraphrases
+DUPLICATE_THRESHOLD = 0.5
+
+# Ranking weights for hybrid scoring
+RANK_WEIGHT_DISTANCE = 0.5
+RANK_WEIGHT_IMPORTANCE = 0.25
+RANK_WEIGHT_RECENCY = 0.15
+RANK_WEIGHT_ACCESS = 0.10
+
+
+def get_session_id() -> str:
+    """Get current session ID from environment or generate one."""
+    return os.environ.get('LLAMA_MEMORY_SESSION', f"session-{int(datetime.now().timestamp())}")
 
 
 @dataclass
@@ -34,7 +51,9 @@ class Memory:
     access_count: int = 0
     superseded_by: Optional[int] = None
     archived: bool = False
-    distance: Optional[float] = None  # For search results
+    session_id: Optional[str] = None
+    distance: Optional[float] = None  # Raw vector distance
+    score: Optional[float] = None  # Hybrid score (lower = better)
 
     def __post_init__(self):
         if self.tags is None:
@@ -56,7 +75,24 @@ class Memory:
             'access_count': self.access_count,
             'superseded_by': self.superseded_by,
             'archived': self.archived,
+            'session_id': self.session_id,
             'distance': self.distance,
+            'score': self.score,
+        }
+
+
+@dataclass
+class DuplicateWarning:
+    """Warning about potential duplicate memory."""
+    existing_id: int
+    existing_content: str
+    similarity: float  # 0-1, higher = more similar
+
+    def to_dict(self) -> dict:
+        return {
+            'existing_id': self.existing_id,
+            'existing_content': self.existing_content[:200],
+            'similarity': round(self.similarity, 3),
         }
 
 
@@ -71,6 +107,38 @@ class MemoryStore:
         """Initialize the memory store."""
         self.db.initialize()
 
+    def check_duplicate(
+        self,
+        content: str,
+        embedding: Optional[list[float]] = None,
+    ) -> Optional[DuplicateWarning]:
+        """Check if similar content already exists."""
+        if embedding is None:
+            embedding = get_embedding(content, self.config)
+
+        embedding_blob = embedding_to_blob(embedding)
+        conn = self.db.conn
+
+        # Find most similar existing memory
+        row = conn.execute("""
+            SELECT m.id, m.content, e.distance
+            FROM memory_embeddings e
+            JOIN memories m ON m.id = e.memory_id
+            WHERE e.embedding MATCH ?
+              AND k = 1
+              AND m.archived = 0
+              AND m.superseded_by IS NULL
+        """, (embedding_blob,)).fetchone()
+
+        if row and row['distance'] < DUPLICATE_THRESHOLD:
+            similarity = 1.0 - row['distance']  # Convert distance to similarity
+            return DuplicateWarning(
+                existing_id=row['id'],
+                existing_content=row['content'],
+                similarity=similarity
+            )
+        return None
+
     def store(
         self,
         content: str,
@@ -80,20 +148,35 @@ class MemoryStore:
         tags: Optional[list[str]] = None,
         importance: int = 5,
         retention: Retention = 'long-term',
-    ) -> int:
-        """Store a new memory with embedding."""
+        session_id: Optional[str] = None,
+        check_duplicates: bool = True,
+        force: bool = False,
+    ) -> Tuple[int, Optional[DuplicateWarning]]:
+        """Store a new memory with embedding.
+
+        Returns tuple of (memory_id, duplicate_warning).
+        If force=False and duplicate found, returns (-1, warning) without storing.
+        """
         now = int(datetime.now().timestamp())
+        session = session_id or get_session_id()
 
         # Generate embedding
         embedding = get_embedding(content, self.config)
         embedding_blob = embedding_to_blob(embedding)
 
+        # Check for duplicates
+        duplicate = None
+        if check_duplicates:
+            duplicate = self.check_duplicate(content, embedding)
+            if duplicate and not force:
+                return (-1, duplicate)
+
         conn = self.db.conn
 
         # Insert memory
         cursor = conn.execute("""
-            INSERT INTO memories (type, content, summary, project, tags, created_at, importance, retention, embedding_model)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO memories (type, content, summary, project, tags, created_at, importance, retention, embedding_model, session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             type,
             content,
@@ -103,7 +186,8 @@ class MemoryStore:
             now,
             importance,
             retention,
-            self.config.embedding_model_version
+            self.config.embedding_model_version,
+            session
         ))
 
         memory_id = cursor.lastrowid
@@ -118,11 +202,59 @@ class MemoryStore:
         conn.execute("""
             INSERT INTO memory_log (memory_id, action, timestamp, details)
             VALUES (?, 'create', ?, ?)
-        """, (memory_id, now, json.dumps({'type': type, 'project': project})))
+        """, (memory_id, now, json.dumps({'type': type, 'project': project, 'session': session})))
 
         conn.commit()
 
-        return memory_id
+        return (memory_id, duplicate)
+
+    def _compute_hybrid_score(
+        self,
+        distance: float,
+        importance: int,
+        created_at: int,
+        access_count: int,
+        now: int,
+    ) -> float:
+        """Compute hybrid ranking score (lower = better).
+
+        Combines:
+        - Vector distance (semantic similarity)
+        - Importance (user-assigned priority)
+        - Recency (newer memories rank higher)
+        - Access frequency (frequently accessed = more relevant)
+        """
+        # Normalize distance (typically 0-2 for cosine, cap at 2)
+        norm_distance = min(distance / 2.0, 1.0)
+
+        # Normalize importance (1-10 -> 0-1, inverted so higher = lower score)
+        norm_importance = 1.0 - (importance / 10.0)
+
+        # Recency decay: memories older than 30 days start decaying
+        age_seconds = now - created_at
+        age_days = age_seconds / 86400
+        # Logarithmic decay: 0 at 0 days, ~0.5 at 30 days, ~0.7 at 90 days, ~1.0 at 365 days
+        if age_days <= 1:
+            norm_recency = 0.0
+        else:
+            norm_recency = min(math.log10(age_days) / 2.5, 1.0)
+
+        # Access frequency boost (inverted so more access = lower score)
+        # Logarithmic scaling to prevent runaway
+        if access_count <= 1:
+            norm_access = 1.0
+        else:
+            norm_access = max(0.0, 1.0 - (math.log10(access_count) / 2.0))
+
+        # Weighted combination
+        score = (
+            RANK_WEIGHT_DISTANCE * norm_distance +
+            RANK_WEIGHT_IMPORTANCE * norm_importance +
+            RANK_WEIGHT_RECENCY * norm_recency +
+            RANK_WEIGHT_ACCESS * norm_access
+        )
+
+        return score
 
     def search(
         self,
@@ -130,10 +262,16 @@ class MemoryStore:
         limit: int = 10,
         type: Optional[MemoryType] = None,
         project: Optional[str] = None,
+        session_id: Optional[str] = None,
         min_importance: Optional[int] = None,
         include_archived: bool = False,
+        hybrid_ranking: bool = True,
     ) -> list[Memory]:
-        """Search memories by semantic similarity."""
+        """Search memories by semantic similarity with hybrid ranking.
+
+        Args:
+            hybrid_ranking: If True, re-ranks results using importance, recency, and access patterns.
+        """
         now = int(datetime.now().timestamp())
 
         # Generate query embedding
@@ -141,6 +279,9 @@ class MemoryStore:
         query_blob = embedding_to_blob(query_embedding)
 
         conn = self.db.conn
+
+        # Get more results for hybrid ranking re-sort
+        fetch_limit = limit * 5 if hybrid_ranking else limit
 
         # Build query with filters
         sql = """
@@ -152,7 +293,7 @@ class MemoryStore:
             WHERE e.embedding MATCH ?
               AND k = ?
         """
-        params = [query_blob, limit * 3]  # Get more to filter
+        params = [query_blob, fetch_limit]
 
         if not include_archived:
             sql += " AND m.archived = 0"
@@ -165,15 +306,16 @@ class MemoryStore:
             sql += " AND (m.project = ? OR m.project IS NULL)"
             params.append(project)
 
+        if session_id:
+            sql += " AND m.session_id = ?"
+            params.append(session_id)
+
         if min_importance:
             sql += " AND m.importance >= ?"
             params.append(min_importance)
 
         # Exclude superseded memories
         sql += " AND m.superseded_by IS NULL"
-
-        sql += " ORDER BY e.distance LIMIT ?"
-        params.append(limit)
 
         # Fetch all results first
         rows = conn.execute(sql, params).fetchall()
@@ -183,6 +325,18 @@ class MemoryStore:
 
         for row in rows:
             ids_to_update.append(row['id'])
+
+            # Compute hybrid score
+            score = None
+            if hybrid_ranking:
+                score = self._compute_hybrid_score(
+                    distance=row['distance'],
+                    importance=row['importance'],
+                    created_at=row['created_at'],
+                    access_count=row['access_count'],
+                    now=now,
+                )
+
             results.append(Memory(
                 id=row['id'],
                 type=row['type'],
@@ -198,16 +352,27 @@ class MemoryStore:
                 access_count=row['access_count'] + 1,
                 superseded_by=row['superseded_by'],
                 archived=bool(row['archived']),
+                session_id=row['session_id'] if 'session_id' in row.keys() else None,
                 distance=row['distance'],
+                score=score,
             ))
 
-        # Update access stats after fetching
+        # Re-sort by hybrid score if enabled
+        if hybrid_ranking:
+            results.sort(key=lambda m: m.score)
+
+        # Limit results
+        results = results[:limit]
+
+        # Update access stats after fetching (only for returned results)
+        returned_ids = {m.id for m in results}
         for memory_id in ids_to_update:
-            conn.execute("""
-                UPDATE memories
-                SET accessed_at = ?, access_count = access_count + 1
-                WHERE id = ?
-            """, (now, memory_id))
+            if memory_id in returned_ids:
+                conn.execute("""
+                    UPDATE memories
+                    SET accessed_at = ?, access_count = access_count + 1
+                    WHERE id = ?
+                """, (now, memory_id))
 
         conn.commit()
 
