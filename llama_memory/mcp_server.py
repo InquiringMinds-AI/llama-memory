@@ -381,6 +381,99 @@ TOOLS = [
             },
             "required": ["id"]
         }
+    },
+    {
+        "name": "memory_link",
+        "description": "Create an explicit link between two memories.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_id": {
+                    "type": "integer",
+                    "description": "Source memory ID"
+                },
+                "target_id": {
+                    "type": "integer",
+                    "description": "Target memory ID"
+                },
+                "link_type": {
+                    "type": "string",
+                    "description": "Type of relationship (related, depends_on, contradicts, etc.)",
+                    "default": "related"
+                },
+                "note": {
+                    "type": "string",
+                    "description": "Optional note about the relationship"
+                }
+            },
+            "required": ["source_id", "target_id"]
+        }
+    },
+    {
+        "name": "memory_unlink",
+        "description": "Remove a link between two memories.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_id": {
+                    "type": "integer",
+                    "description": "Source memory ID"
+                },
+                "target_id": {
+                    "type": "integer",
+                    "description": "Target memory ID"
+                }
+            },
+            "required": ["source_id", "target_id"]
+        }
+    },
+    {
+        "name": "memory_links",
+        "description": "Get all links for a memory (both incoming and outgoing).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "Memory ID"
+                }
+            },
+            "required": ["id"]
+        }
+    },
+    {
+        "name": "memory_types",
+        "description": "List all memory types in use with counts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
+        "name": "memory_count",
+        "description": "Count memories with optional filters.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "description": "Filter by memory type"
+                },
+                "project": {
+                    "type": "string",
+                    "description": "Filter by project"
+                },
+                "min_importance": {
+                    "type": "integer",
+                    "description": "Minimum importance level"
+                },
+                "include_archived": {
+                    "type": "boolean",
+                    "description": "Include archived memories",
+                    "default": False
+                }
+            }
+        }
     }
 ]
 
@@ -661,6 +754,67 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
                 result_text = f"Unarchived memory {args['id']}"
             else:
                 result_text = f"Memory {args['id']} not found"
+
+        elif tool_name == "memory_link":
+            try:
+                created = store.link(
+                    source_id=args["source_id"],
+                    target_id=args["target_id"],
+                    link_type=args.get("link_type", "related"),
+                    note=args.get("note"),
+                )
+                if created:
+                    result_text = f"Linked memory {args['source_id']} -> {args['target_id']}"
+                else:
+                    result_text = f"Link already exists between {args['source_id']} and {args['target_id']}"
+            except ValueError as e:
+                result_text = f"Error: {e}"
+
+        elif tool_name == "memory_unlink":
+            removed = store.unlink(args["source_id"], args["target_id"])
+            if removed:
+                result_text = f"Removed link between {args['source_id']} and {args['target_id']}"
+            else:
+                result_text = f"No link found between {args['source_id']} and {args['target_id']}"
+
+        elif tool_name == "memory_links":
+            links = store.get_links(args["id"])
+            result_text = json.dumps(links, indent=2)
+
+        elif tool_name == "memory_types":
+            conn = store.db.conn
+            rows = conn.execute("""
+                SELECT type, COUNT(*) as count
+                FROM memories
+                WHERE archived = 0
+                GROUP BY type
+                ORDER BY count DESC
+            """).fetchall()
+            types = {row['type']: row['count'] for row in rows}
+            result_text = json.dumps(types, indent=2)
+
+        elif tool_name == "memory_count":
+            conn = store.db.conn
+            sql = "SELECT COUNT(*) as cnt FROM memories WHERE 1=1"
+            params = []
+
+            if not args.get("include_archived", False):
+                sql += " AND archived = 0"
+
+            if args.get("type"):
+                sql += " AND type = ?"
+                params.append(args["type"])
+
+            if args.get("project"):
+                sql += " AND project = ?"
+                params.append(args["project"])
+
+            if args.get("min_importance"):
+                sql += " AND importance >= ?"
+                params.append(args["min_importance"])
+
+            row = conn.execute(sql, params).fetchone()
+            result_text = str(row['cnt'])
 
         else:
             send_response(id, error={"code": -32601, "message": f"Unknown tool: {tool_name}"})

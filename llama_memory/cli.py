@@ -931,6 +931,101 @@ def cmd_count(args):
     return 0
 
 
+def cmd_link(args):
+    """Link two memories together."""
+    config = get_config()
+    store = get_store(config)
+
+    try:
+        created = store.link(
+            source_id=args.source,
+            target_id=args.target,
+            link_type=args.type,
+            note=args.note,
+        )
+        if created:
+            print(f"Linked memory {args.source} -> {args.target} ({args.type})")
+        else:
+            print(f"Link already exists between {args.source} and {args.target}")
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+    return 0
+
+
+def cmd_unlink(args):
+    """Remove a link between two memories."""
+    config = get_config()
+    store = get_store(config)
+
+    removed = store.unlink(args.source, args.target)
+    if removed:
+        print(f"Removed link between {args.source} and {args.target}")
+    else:
+        print(f"No link found between {args.source} and {args.target}")
+        return 1
+
+    return 0
+
+
+def cmd_links(args):
+    """Show links for a memory."""
+    config = get_config()
+    store = get_store(config)
+
+    memory = store.get(args.id)
+    if not memory:
+        print(f"Memory {args.id} not found")
+        return 1
+
+    links = store.get_links(args.id)
+
+    if args.format == 'json':
+        print(json.dumps(links, indent=2))
+    else:
+        if not links:
+            print(f"No links for memory {args.id}")
+        else:
+            print(f"Links for memory {args.id}: {memory.content[:60]}...\n")
+            for link in links:
+                direction = "->" if link['direction'] == 'outgoing' else "<-"
+                note = f" ({link['note']})" if link['note'] else ""
+                print(f"  {direction} [{link['linked_id']}] {link['link_type']}{note}")
+                print(f"     {link['content'][:70]}...")
+
+    return 0
+
+
+def cmd_types(args):
+    """List all memory types in use."""
+    config = get_config()
+    store = get_store(config)
+
+    conn = store.db.conn
+    rows = conn.execute("""
+        SELECT type, COUNT(*) as count
+        FROM memories
+        WHERE archived = 0
+        GROUP BY type
+        ORDER BY count DESC
+    """).fetchall()
+
+    if not rows:
+        print("No memories found")
+        return 0
+
+    if args.format == 'json':
+        types = {row['type']: row['count'] for row in rows}
+        print(json.dumps(types, indent=2))
+    else:
+        print("Memory types:")
+        for row in rows:
+            print(f"  {row['type']}: {row['count']}")
+
+    return 0
+
+
 def cmd_sessions(args):
     """List and browse sessions."""
     config = get_config()
@@ -1217,6 +1312,32 @@ def main():
     p_count.add_argument("--include-archived", "-a", action="store_true", help="Include archived")
     p_count.add_argument("--quiet", "-q", action="store_true", help="Output number only")
     p_count.set_defaults(func=cmd_count)
+
+    # link
+    p_link = subparsers.add_parser("link", help="Link two memories together")
+    p_link.add_argument("source", type=int, help="Source memory ID")
+    p_link.add_argument("target", type=int, help="Target memory ID")
+    p_link.add_argument("--type", "-t", default="related",
+                        help="Link type (related, depends_on, contradicts, etc.)")
+    p_link.add_argument("--note", "-n", help="Note about the relationship")
+    p_link.set_defaults(func=cmd_link)
+
+    # unlink
+    p_unlink = subparsers.add_parser("unlink", help="Remove a link between memories")
+    p_unlink.add_argument("source", type=int, help="Source memory ID")
+    p_unlink.add_argument("target", type=int, help="Target memory ID")
+    p_unlink.set_defaults(func=cmd_unlink)
+
+    # links
+    p_links = subparsers.add_parser("links", help="Show links for a memory")
+    p_links.add_argument("id", type=int, help="Memory ID")
+    p_links.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_links.set_defaults(func=cmd_links)
+
+    # types
+    p_types = subparsers.add_parser("types", help="List memory types in use")
+    p_types.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_types.set_defaults(func=cmd_types)
 
     args = parser.parse_args()
 

@@ -12,7 +12,7 @@ from typing import Optional
 from datetime import datetime
 from .config import Config, get_config
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 -- Main memories table
@@ -95,6 +95,20 @@ CREATE TABLE IF NOT EXISTS memory_log (
     timestamp INTEGER NOT NULL,
     details TEXT  -- JSON
 );
+
+-- Explicit links between memories
+CREATE TABLE IF NOT EXISTS memory_links (
+    id INTEGER PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    target_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    link_type TEXT DEFAULT 'related',  -- related, depends_on, contradicts, etc.
+    note TEXT,  -- Optional note about the relationship
+    created_at INTEGER NOT NULL,
+    UNIQUE(source_id, target_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_links_source ON memory_links(source_id);
+CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id);
 """
 
 VECTOR_TABLE_SQL = """
@@ -159,6 +173,27 @@ class Database:
                 conn.commit()
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
+                    raise
+
+        if current_version < 3:
+            # Migration v2 -> v3: Add memory_links table
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS memory_links (
+                        id INTEGER PRIMARY KEY,
+                        source_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                        target_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                        link_type TEXT DEFAULT 'related',
+                        note TEXT,
+                        created_at INTEGER NOT NULL,
+                        UNIQUE(source_id, target_id)
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_links_source ON memory_links(source_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id)")
+                conn.commit()
+            except sqlite3.OperationalError as e:
+                if "already exists" not in str(e).lower():
                     raise
 
     def initialize(self):

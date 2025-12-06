@@ -781,6 +781,113 @@ class MemoryStore:
         conn.commit()
         return count
 
+    def link(
+        self,
+        source_id: int,
+        target_id: int,
+        link_type: str = 'related',
+        note: Optional[str] = None,
+    ) -> bool:
+        """Create a link between two memories.
+
+        Args:
+            source_id: The memory creating the link
+            target_id: The memory being linked to
+            link_type: Type of relationship (related, depends_on, contradicts, etc.)
+            note: Optional note explaining the relationship
+
+        Returns:
+            True if link created, False if already exists
+        """
+        if source_id == target_id:
+            raise ValueError("Cannot link a memory to itself")
+
+        # Verify both memories exist
+        if not self.get(source_id):
+            raise ValueError(f"Memory {source_id} not found")
+        if not self.get(target_id):
+            raise ValueError(f"Memory {target_id} not found")
+
+        conn = self.db.conn
+        now = int(datetime.now().timestamp())
+
+        try:
+            conn.execute("""
+                INSERT INTO memory_links (source_id, target_id, link_type, note, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (source_id, target_id, link_type, note, now))
+            conn.commit()
+            return True
+        except Exception as e:
+            if "UNIQUE constraint" in str(e):
+                return False  # Link already exists
+            raise
+
+    def unlink(self, source_id: int, target_id: int) -> bool:
+        """Remove a link between two memories.
+
+        Returns:
+            True if link removed, False if it didn't exist
+        """
+        conn = self.db.conn
+        cursor = conn.execute("""
+            DELETE FROM memory_links
+            WHERE source_id = ? AND target_id = ?
+        """, (source_id, target_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def get_links(self, memory_id: int) -> list[dict]:
+        """Get all links for a memory (both directions).
+
+        Returns:
+            List of dicts with link info and linked memory
+        """
+        conn = self.db.conn
+        links = []
+
+        # Links where this memory is the source
+        rows = conn.execute("""
+            SELECT l.*, m.content, m.type, m.importance
+            FROM memory_links l
+            JOIN memories m ON m.id = l.target_id
+            WHERE l.source_id = ?
+        """, (memory_id,)).fetchall()
+
+        for row in rows:
+            links.append({
+                'direction': 'outgoing',
+                'linked_id': row['target_id'],
+                'link_type': row['link_type'],
+                'note': row['note'],
+                'created_at': row['created_at'],
+                'content': row['content'],
+                'type': row['type'],
+                'importance': row['importance'],
+            })
+
+        # Links where this memory is the target
+        rows = conn.execute("""
+            SELECT l.*, m.content, m.type, m.importance
+            FROM memory_links l
+            JOIN memories m ON m.id = l.source_id
+            WHERE l.target_id = ?
+        """, (memory_id,)).fetchall()
+
+        for row in rows:
+            links.append({
+                'direction': 'incoming',
+                'linked_id': row['source_id'],
+                'link_type': row['link_type'],
+                'note': row['note'],
+                'created_at': row['created_at'],
+                'content': row['content'],
+                'type': row['type'],
+                'importance': row['importance'],
+            })
+
+        return links
+
 
 # Module-level convenience functions
 _store: Optional[MemoryStore] = None
