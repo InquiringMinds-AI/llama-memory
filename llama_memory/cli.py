@@ -64,6 +64,112 @@ def cmd_store(args):
     return 0
 
 
+def cmd_batch_store(args):
+    """Store multiple memories from JSON file or stdin."""
+    config = get_config()
+    store = get_store(config)
+    store.initialize()
+
+    # Read from file or stdin
+    if args.file:
+        with open(args.file) as f:
+            data = json.load(f)
+    else:
+        data = json.load(sys.stdin)
+
+    if not isinstance(data, list):
+        data = [data]
+
+    stored = 0
+    skipped = 0
+    errors = []
+
+    for i, item in enumerate(data):
+        try:
+            content = item.get('content')
+            if not content:
+                errors.append(f"Item {i}: missing content")
+                continue
+
+            memory_id, duplicate = store.store(
+                content=content,
+                type=item.get('type', 'fact'),
+                summary=item.get('summary'),
+                project=item.get('project'),
+                importance=item.get('importance', 5),
+                tags=item.get('tags', []),
+                retention=item.get('retention', 'long-term'),
+                force=args.force,
+            )
+
+            if memory_id == -1:
+                skipped += 1
+                if args.verbose:
+                    print(f"Skipped (duplicate of #{duplicate.existing_id}): {content[:50]}...")
+            else:
+                stored += 1
+                if args.verbose:
+                    print(f"Stored #{memory_id}: {content[:50]}...")
+
+        except Exception as e:
+            errors.append(f"Item {i}: {e}")
+
+    print(f"Stored: {stored}, Skipped: {skipped}, Errors: {len(errors)}")
+    if errors and args.verbose:
+        for err in errors:
+            print(f"  Error: {err}")
+
+    return 0 if not errors else 1
+
+
+def cmd_import(args):
+    """Import memories from a JSON export file."""
+    config = get_config()
+    store = get_store(config)
+    store.initialize()
+
+    with open(args.file) as f:
+        data = json.load(f)
+
+    if not isinstance(data, list):
+        print("Expected JSON array of memories")
+        return 1
+
+    imported = 0
+    skipped = 0
+
+    for item in data:
+        # Skip archived unless --include-archived
+        if item.get('archived') and not args.include_archived:
+            skipped += 1
+            continue
+
+        # Skip if superseded
+        if item.get('superseded_by'):
+            skipped += 1
+            continue
+
+        memory_id, duplicate = store.store(
+            content=item['content'],
+            type=item.get('type', 'fact'),
+            summary=item.get('summary'),
+            project=item.get('project'),
+            importance=item.get('importance', 5),
+            tags=item.get('tags', []),
+            retention=item.get('retention', 'long-term'),
+            force=args.force,
+            check_duplicates=not args.force,
+        )
+
+        if memory_id > 0:
+            imported += 1
+        else:
+            skipped += 1
+
+    print(f"Imported: {imported}, Skipped: {skipped}")
+    return 0
+
+
 def cmd_search(args):
     """Search memories."""
     config = get_config()
@@ -496,6 +602,20 @@ def main():
                          choices=["permanent", "long-term", "medium", "short", "session"])
     p_store.add_argument("--force", action="store_true", help="Store even if duplicate detected")
     p_store.set_defaults(func=cmd_store)
+
+    # batch-store
+    p_batch = subparsers.add_parser("batch-store", help="Store multiple memories from JSON")
+    p_batch.add_argument("--file", "-f", help="JSON file (or stdin if not provided)")
+    p_batch.add_argument("--force", action="store_true", help="Store even if duplicates detected")
+    p_batch.add_argument("--verbose", "-v", action="store_true", help="Show each item stored")
+    p_batch.set_defaults(func=cmd_batch_store)
+
+    # import
+    p_import = subparsers.add_parser("import", help="Import memories from export JSON")
+    p_import.add_argument("file", help="JSON file from 'export' command")
+    p_import.add_argument("--force", action="store_true", help="Skip duplicate detection")
+    p_import.add_argument("--include-archived", action="store_true", help="Also import archived memories")
+    p_import.set_defaults(func=cmd_import)
 
     # search
     p_search = subparsers.add_parser("search", help="Semantic search")

@@ -293,6 +293,54 @@ TOOLS = [
             "type": "object",
             "properties": {}
         }
+    },
+    {
+        "name": "memory_recall",
+        "description": "Get a context block of relevant memories for session start. Returns high-importance memories formatted for context injection.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional topic to focus recall on"
+                },
+                "project": {
+                    "type": "string",
+                    "description": "Filter by project"
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 10
+                },
+                "min_importance": {
+                    "type": "integer",
+                    "description": "Minimum importance (default 7 for auto, 5 with query)"
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["compact", "markdown", "json"],
+                    "default": "compact"
+                }
+            }
+        }
+    },
+    {
+        "name": "memory_related",
+        "description": "Find memories related to a specific memory (similar content, same session, supersession chain).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "Memory ID to find relations for"
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 10
+                }
+            },
+            "required": ["id"]
+        }
     }
 ]
 
@@ -416,6 +464,86 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
         elif tool_name == "memory_cleanup":
             count = store.cleanup_expired()
             result_text = f"Archived {count} expired memories"
+
+        elif tool_name == "memory_recall":
+            query = args.get("query")
+            limit = args.get("limit", 10)
+            project = args.get("project")
+            min_importance = args.get("min_importance")
+            fmt = args.get("format", "compact")
+
+            if query:
+                memories = store.search(
+                    query=query,
+                    limit=limit,
+                    project=project,
+                    min_importance=min_importance or 5,
+                )
+            else:
+                memories = store.list(
+                    limit=limit,
+                    project=project,
+                    order_by='accessed_at',
+                )
+                memories = [m for m in memories if m.importance >= (min_importance or 7)]
+
+            if fmt == "markdown":
+                lines = ["# Memory Context\n"]
+                for m in memories:
+                    lines.append(f"## [{m.type.upper()}] (importance: {m.importance})")
+                    if m.project:
+                        lines.append(f"*Project: {m.project}*\n")
+                    lines.append(m.content)
+                    lines.append("")
+                result_text = "\n".join(lines)
+            elif fmt == "compact":
+                lines = []
+                for m in memories:
+                    prefix = f"[{m.type}:{m.importance}]"
+                    if m.project:
+                        prefix += f" ({m.project})"
+                    content = m.content[:150] + "..." if len(m.content) > 150 else m.content
+                    lines.append(f"{prefix} {content}")
+                result_text = "\n".join(lines)
+            else:
+                result_text = json.dumps([m.to_dict() for m in memories], indent=2)
+
+        elif tool_name == "memory_related":
+            source = store.get(args["id"])
+            if not source:
+                result_text = f"Memory {args['id']} not found"
+            else:
+                limit = args.get("limit", 10)
+                results = []
+
+                # Similar memories
+                similar = store.search(query=source.content, limit=limit + 1)
+                for m in similar:
+                    if m.id != source.id:
+                        results.append({"memory": m.to_dict(), "relation": "similar"})
+
+                # Same session
+                if source.session_id:
+                    session_mems = store.search(query=source.content, limit=50, session_id=source.session_id)
+                    for m in session_mems:
+                        if m.id != source.id and m.id not in [r["memory"]["id"] for r in results]:
+                            results.append({"memory": m.to_dict(), "relation": "same-session"})
+
+                # Supersession chain
+                if source.superseded_by:
+                    newer = store.get(source.superseded_by)
+                    if newer:
+                        results.append({"memory": newer.to_dict(), "relation": "supersedes-this"})
+
+                conn = store.db.conn
+                older_row = conn.execute("SELECT id FROM memories WHERE superseded_by = ?", (source.id,)).fetchone()
+                if older_row:
+                    older = store.get(older_row['id'])
+                    if older:
+                        results.append({"memory": older.to_dict(), "relation": "superseded-by-this"})
+
+                results = results[:limit]
+                result_text = json.dumps(results, indent=2)
 
         else:
             send_response(id, error={"code": -32601, "message": f"Unknown tool: {tool_name}"})
