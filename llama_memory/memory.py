@@ -31,7 +31,8 @@ def _row_get(row, key, default=None):
 # 0.5 catches near-duplicates, 0.7 catches paraphrases
 DUPLICATE_THRESHOLD = 0.5
 
-# Ranking weights for hybrid scoring
+# Default ranking weights for hybrid scoring (used if config not available)
+# These are now configurable via config.yaml scoring section
 RANK_WEIGHT_DISTANCE = 0.5
 RANK_WEIGHT_IMPORTANCE = 0.25
 RANK_WEIGHT_RECENCY = 0.15
@@ -361,20 +362,27 @@ class MemoryStore:
         created_at: int,
         access_count: int,
         now: int,
+        confidence: float = 1.0,
+        entity_match_ratio: float = 0.0,
     ) -> float:
         """Compute hybrid ranking score (lower = better).
 
-        Combines:
+        Combines (weights from config):
         - Vector distance (semantic similarity)
         - Importance (user-assigned priority)
         - Recency (newer memories rank higher)
         - Access frequency (frequently accessed = more relevant)
+        - Confidence (memory certainty)
+        - Entity match (bonus for matching entities)
         """
+        # Get weights from config
+        weights = self.config.scoring
+
         # Normalize distance (typically 0-2 for cosine, cap at 2)
         norm_distance = min(distance / 2.0, 1.0)
 
         # Normalize importance (1-10 -> 0-1, inverted so higher = lower score)
-        norm_importance = 1.0 - (importance / 10.0)
+        norm_importance = 1.0 - ((importance or 5) / 10.0)
 
         # Recency decay: memories older than 30 days start decaying
         age_seconds = now - created_at
@@ -392,15 +400,74 @@ class MemoryStore:
         else:
             norm_access = max(0.0, 1.0 - (math.log10(access_count) / 2.0))
 
-        # Weighted combination
+        # Confidence (inverted: higher confidence = lower score = better)
+        norm_confidence = 1.0 - min(1.0, max(0.0, confidence))
+
+        # Entity match (inverted: higher match = lower score = better)
+        norm_entity = 1.0 - min(1.0, max(0.0, entity_match_ratio))
+
+        # Weighted combination using config weights
         score = (
-            RANK_WEIGHT_DISTANCE * norm_distance +
-            RANK_WEIGHT_IMPORTANCE * norm_importance +
-            RANK_WEIGHT_RECENCY * norm_recency +
-            RANK_WEIGHT_ACCESS * norm_access
+            weights.semantic * norm_distance +
+            weights.importance * norm_importance +
+            weights.recency * norm_recency +
+            weights.frequency * norm_access +
+            weights.confidence * norm_confidence +
+            weights.entity_match * norm_entity
         )
 
         return score
+
+    def _compute_entity_match_ratio(
+        self,
+        memory_entities: Optional[str],
+        query_entities: list,
+    ) -> float:
+        """Compute entity overlap ratio between memory and query.
+
+        Returns 0.0 (no match) to 1.0 (full match).
+        """
+        if not query_entities or not memory_entities:
+            return 0.0
+
+        # Parse memory entities if JSON string
+        try:
+            if isinstance(memory_entities, str):
+                mem_entities = json.loads(memory_entities)
+            else:
+                mem_entities = memory_entities
+        except (json.JSONDecodeError, TypeError):
+            return 0.0
+
+        if not mem_entities:
+            return 0.0
+
+        # Get normalized names from memory entities
+        mem_names = set()
+        for e in mem_entities:
+            if isinstance(e, dict):
+                name = e.get('normalized', e.get('name', ''))
+            else:
+                name = str(e)
+            if name:
+                mem_names.add(name.lower())
+
+        # Get normalized names from query entities
+        query_names = set()
+        for e in query_entities:
+            if hasattr(e, 'normalized'):
+                query_names.add(e.normalized.lower())
+            elif isinstance(e, dict):
+                name = e.get('normalized', e.get('name', ''))
+                if name:
+                    query_names.add(name.lower())
+
+        if not query_names:
+            return 0.0
+
+        # Calculate overlap
+        overlap = len(mem_names & query_names)
+        return overlap / len(query_names)
 
     def search(
         self,
@@ -418,9 +485,19 @@ class MemoryStore:
         """Search memories by semantic similarity with hybrid ranking.
 
         Args:
-            hybrid_ranking: If True, re-ranks results using importance, recency, and access patterns.
+            hybrid_ranking: If True, re-ranks results using importance, recency,
+                           access patterns, confidence, and entity matching.
         """
         now = int(datetime.now().timestamp())
+
+        # Extract entities from query for entity matching bonus
+        query_entities = []
+        if hybrid_ranking and self.config.scoring.entity_match > 0:
+            try:
+                from .entities import extract_entities
+                query_entities = extract_entities(query)
+            except ImportError:
+                pass
 
         # Generate query embedding
         query_embedding = get_embedding(query, self.config)
@@ -482,15 +559,25 @@ class MemoryStore:
         for row in rows:
             ids_to_update.append(row['id'])
 
-            # Compute hybrid score
+            # Compute hybrid score with entity matching
             score = None
             if hybrid_ranking:
+                # Get entity match ratio
+                entity_match_ratio = 0.0
+                if query_entities:
+                    entity_match_ratio = self._compute_entity_match_ratio(
+                        _row_get(row, 'entities'),
+                        query_entities
+                    )
+
                 score = self._compute_hybrid_score(
                     distance=row['distance'],
                     importance=row['importance'],
                     created_at=row['created_at'],
                     access_count=row['access_count'],
                     now=now,
+                    confidence=_row_get(row, 'confidence', 1.0),
+                    entity_match_ratio=entity_match_ratio,
                 )
 
             mem = self._row_to_memory(row, distance=row['distance'], score=score)

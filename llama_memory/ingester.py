@@ -1,8 +1,11 @@
 """
-Document ingestion for llama-memory v2.5.
+Document ingestion for llama-memory v2.6.
 
-Supports ingesting documents (Markdown, text, JSON) into memory with smart chunking.
+Supports ingesting documents (Markdown, text, JSON, PDF) into memory with smart chunking.
 Large documents are split into linked memory chunks with preserved structure.
+
+PDF support requires the optional 'pdf' extra:
+    pip install llama-memory[pdf]
 """
 
 from __future__ import annotations
@@ -13,6 +16,14 @@ import json
 from typing import List, Optional, Literal, Tuple
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# Optional PDF support
+try:
+    from pypdf import PdfReader
+    PDF_AVAILABLE = True
+except ImportError:
+    PdfReader = None
+    PDF_AVAILABLE = False
 
 
 @dataclass
@@ -338,6 +349,7 @@ class Ingester:
             '.text': 'text',
             '.json': 'json',
             '.jsonl': 'jsonl',
+            '.pdf': 'pdf',
             '.py': 'text',
             '.js': 'text',
             '.ts': 'text',
@@ -354,6 +366,58 @@ class Ingester:
         """Read file content."""
         with open(path, 'r', encoding='utf-8') as f:
             return f.read()
+
+    def _read_pdf(self, path: str) -> Tuple[str, dict]:
+        """Read PDF file content with metadata.
+
+        Args:
+            path: Path to PDF file
+
+        Returns:
+            Tuple of (extracted_text, metadata_dict)
+
+        Raises:
+            ImportError: If pypdf is not installed
+            ValueError: If PDF extraction fails
+        """
+        if not PDF_AVAILABLE:
+            raise ImportError(
+                "PDF support requires pypdf. Install with: pip install llama-memory[pdf]"
+            )
+
+        try:
+            reader = PdfReader(path)
+
+            # Extract metadata
+            metadata = {}
+            if reader.metadata:
+                if reader.metadata.title:
+                    metadata['title'] = str(reader.metadata.title)
+                if reader.metadata.author:
+                    metadata['author'] = str(reader.metadata.author)
+                if reader.metadata.subject:
+                    metadata['subject'] = str(reader.metadata.subject)
+                if reader.metadata.creation_date:
+                    metadata['created'] = str(reader.metadata.creation_date)
+
+            metadata['page_count'] = len(reader.pages)
+
+            # Extract text from all pages
+            pages = []
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text()
+                if text:
+                    # Clean up extracted text
+                    text = text.strip()
+                    # Add page marker for chunking reference
+                    pages.append(f"[Page {i + 1}]\n{text}")
+
+            full_text = '\n\n'.join(pages)
+
+            return full_text, metadata
+
+        except Exception as e:
+            raise ValueError(f"Failed to extract PDF content: {e}")
 
     def ingest(
         self,
@@ -380,15 +444,31 @@ class Ingester:
 
         Returns:
             List of created memory IDs
-        """
-        store = self._get_store()
 
-        # Read file
-        content = self._read_file(path)
+        Raises:
+            ImportError: If PDF file and pypdf not installed
+            ValueError: If file cannot be read or parsed
+        """
+        from .config import get_config
+
+        store = self._get_store()
+        config = get_config()
 
         # Detect format
         if format is None:
             format = self._detect_format(path)
+
+        # Handle PDF files
+        pdf_metadata = {}
+        if format == 'pdf':
+            if not config.ingestion.pdf_enabled:
+                raise ValueError("PDF ingestion is disabled in config")
+            content, pdf_metadata = self._read_pdf(path)
+            # PDFs are processed as text after extraction
+            format = 'text'
+        else:
+            # Read text file
+            content = self._read_file(path)
 
         # Create chunker with custom size if specified
         chunker = self.chunker
@@ -414,10 +494,15 @@ class Ingester:
 
         for chunk in chunks:
             # Build chunk metadata
-            chunk_summary = self._generate_chunk_summary(chunk, file_name)
+            chunk_summary = self._generate_chunk_summary(chunk, file_name, pdf_metadata)
             chunk_tags = list(tags) if tags else []
             if chunk.heading:
                 chunk_tags.append(f"section:{chunk.heading}")
+
+            # Merge PDF metadata with chunk metadata
+            chunk_metadata = dict(chunk.metadata)
+            if pdf_metadata:
+                chunk_metadata['pdf'] = pdf_metadata
 
             mem_id, _ = store.store(
                 content=chunk.content,
@@ -431,6 +516,7 @@ class Ingester:
                 chunk_index=chunk.index,
                 chunk_of=memory_ids[0] if memory_ids else None,
                 source='import',
+                metadata=chunk_metadata if chunk_metadata else None,
                 force=True,  # Don't check duplicates for document chunks
             )
 
@@ -485,15 +571,30 @@ class Ingester:
 
         return memory_ids
 
-    def _generate_chunk_summary(self, chunk: Chunk, file_name: str) -> str:
+    def _generate_chunk_summary(
+        self,
+        chunk: Chunk,
+        file_name: str,
+        pdf_metadata: Optional[dict] = None
+    ) -> str:
         """Generate a summary for a chunk."""
-        parts = [f"From {file_name}"]
+        parts = []
+
+        # Use PDF title if available, otherwise file name
+        if pdf_metadata and pdf_metadata.get('title'):
+            parts.append(f"From '{pdf_metadata['title']}'")
+        else:
+            parts.append(f"From {file_name}")
 
         if chunk.heading:
             parts.append(f", section '{chunk.heading}'")
 
         if chunk.index > 0:
             parts.append(f" (part {chunk.index + 1})")
+
+        # Add author if PDF
+        if pdf_metadata and pdf_metadata.get('author'):
+            parts.append(f" by {pdf_metadata['author']}")
 
         parts.append(f": {chunk.content[:50]}...")
 
@@ -578,3 +679,30 @@ def get_ingester() -> Ingester:
 def ingest_document(path: str, **kwargs) -> List[int]:
     """Ingest a document into memory."""
     return get_ingester().ingest(path, **kwargs)
+
+
+def is_pdf_available() -> bool:
+    """Check if PDF support is available."""
+    return PDF_AVAILABLE
+
+
+def ingest_pdf(path: str, **kwargs) -> List[int]:
+    """Ingest a PDF document into memory.
+
+    Convenience wrapper that raises early if PDF support unavailable.
+
+    Args:
+        path: Path to PDF file
+        **kwargs: Additional arguments passed to ingest()
+
+    Returns:
+        List of created memory IDs
+
+    Raises:
+        ImportError: If pypdf is not installed
+    """
+    if not PDF_AVAILABLE:
+        raise ImportError(
+            "PDF support requires pypdf. Install with: pip install llama-memory[pdf]"
+        )
+    return get_ingester().ingest(path, format='pdf', **kwargs)

@@ -24,7 +24,14 @@ llama-memory solves this by using llama.cpp, which compiles to a single binary a
 - **Memory decay** - Auto-archives old conversational memories while protecting project knowledge
 - **Hierarchical memories** - Parent/child relationships for structured knowledge
 
-### v2.5 Features (NEW)
+### v2.6 Features (NEW)
+- **Full config.yaml system** - All settings configurable via YAML
+- **Configurable scoring weights** - Tune semantic, importance, recency, frequency, confidence, entity_match weights
+- **Entity match scoring bonus** - Memories matching query entities rank higher
+- **Enhanced name extraction** - Detects "Dr. Johnson", "by John Smith", possessive forms like "Alex's"
+- **PDF ingestion** - Extract and chunk PDF documents (optional: `pip install llama-memory[pdf]`)
+
+### v2.5 Features
 - **Token-budgeted recall** - Dual-response pattern: all summaries + top memories within token budget
 - **Auto-summarization** - Automatically generates summaries on store
 - **Entity extraction** - Automatically extracts people, projects, tools, concepts, organizations
@@ -427,6 +434,114 @@ Development modes for automatic memory capture:
 | `green` | Files, commands, sessions, errors |
 | `brown` | Sessions and errors only |
 | `quiet` | Minimal (default) |
+
+## v2.6 Features
+
+### Full Configuration System
+
+All settings are now configurable via `~/.config/llama-memory/config.yaml`:
+
+```yaml
+# Scoring weights (auto-normalized to sum to 1.0)
+scoring:
+  semantic: 0.40      # Vector similarity
+  importance: 0.25    # User-assigned importance
+  recency: 0.15       # Time decay
+  frequency: 0.10     # Access count
+  confidence: 0.05    # Memory certainty
+  entity_match: 0.05  # Entity overlap bonus
+
+# Entity extraction settings
+entities:
+  enabled: true
+  extract_names: true  # Enable name heuristics
+  max_entities: 20     # Cap per memory
+  additional_tools:    # Custom tool names
+    - myframework
+  additional_orgs:     # Custom org names
+    - mycompany
+
+# Document ingestion
+ingestion:
+  pdf_enabled: true
+  max_chunk_size: 500
+  overlap: 50
+
+# Token budget defaults
+budget:
+  max_tokens: 4000
+  summary_tokens: 25
+
+# Memory decay
+decay:
+  enabled: true
+  start_days: 120
+  archive_days: 180
+```
+
+```python
+# Access config in Python
+from llama_memory import get_config, reload_config
+
+config = get_config()
+print(config.scoring.semantic)  # 0.40
+
+# Reload after editing config.yaml
+reload_config()
+```
+
+### Enhanced Entity Extraction
+
+Name detection now uses heuristics to find people:
+
+```python
+from llama_memory import extract_entities
+
+# Detects names after prefixes (Dr., by, from, etc.)
+extract_entities("Dr. Johnson said...")  # -> Johnson (person)
+
+# Detects two-word names
+extract_entities("by John Smith")  # -> John Smith (person)
+
+# Detects possessive forms
+extract_entities("Alex's project")  # -> Alex (person)
+
+# Detects known first names
+extract_entities("Sarah mentioned...")  # -> Sarah (person)
+```
+
+### PDF Ingestion
+
+Ingest PDF documents (requires optional dependency):
+
+```bash
+# Install PDF support
+pip install llama-memory[pdf]
+
+# Ingest a PDF
+llama-memory ingest research-paper.pdf --importance 7
+
+# Or via Python
+from llama_memory import ingest_pdf, is_pdf_available
+
+if is_pdf_available():
+    memory_ids = ingest_pdf("paper.pdf", project="research")
+```
+
+PDF metadata (title, author) is extracted and stored with chunks.
+
+### Entity Match Scoring
+
+Search results now rank higher if they share entities with your query:
+
+```python
+# If query mentions "Claude" and "Anthropic", memories containing
+# those entities get a scoring bonus
+results = search("Claude and Anthropic announcements")
+# Memories about Claude/Anthropic rank higher even with similar vector distances
+```
+
+This is controlled by `scoring.entity_match` weight in config.
 
 ## Model Changes
 

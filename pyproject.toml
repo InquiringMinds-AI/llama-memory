@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llama-memory"
-version = "1.0.0"
+version = "2.6.0"
 description = "Local vector memory for AI assistants using llama.cpp and sqlite-vec"
 readme = "README.md"
 license = {text = "MIT"}
@@ -43,11 +43,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+pdf = [
+    "pypdf>=4.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "black>=23.0",
     "ruff>=0.1",
+]
+all = [
+    "pypdf>=4.0",
 ]
 
 [project.urls]

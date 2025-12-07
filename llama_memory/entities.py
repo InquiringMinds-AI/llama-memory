@@ -139,22 +139,108 @@ class EntityExtractor:
         'post-install', 'pre-install', 'co-authored',
     }
 
+    # Name prefixes that indicate the following word is likely a name
+    NAME_PREFIXES: Set[str] = {
+        'by', 'from', 'with', 'to', 'for',
+        'said', 'told', 'asked', 'mentioned', 'suggested', 'wrote',
+        'author', 'creator', 'developer', 'owner', 'founder',
+        'dr', 'dr.', 'mr', 'mr.', 'mrs', 'mrs.', 'ms', 'ms.', 'prof', 'professor',
+        'meet', 'met', 'meeting', 'call', 'called', 'emailed',
+        'cc', 'via', 'per',
+    }
+
+    # Words to skip when detecting names (days, months, common words)
+    SKIP_WORDS: Set[str] = {
+        # Days
+        'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+        # Months
+        'january', 'february', 'march', 'april', 'may', 'june',
+        'july', 'august', 'september', 'october', 'november', 'december',
+        # Common sentence starters
+        'the', 'this', 'that', 'these', 'those', 'what', 'when',
+        'where', 'which', 'who', 'why', 'how', 'if', 'then',
+        'but', 'and', 'or', 'not', 'for', 'with', 'from',
+        'after', 'before', 'during', 'about', 'into', 'through',
+        'also', 'however', 'therefore', 'thus', 'hence', 'meanwhile',
+        'furthermore', 'moreover', 'nevertheless', 'otherwise',
+        # Technical terms often capitalized
+        'api', 'sdk', 'cli', 'gui', 'url', 'uri', 'http', 'https',
+        'json', 'xml', 'html', 'css', 'sql', 'mcp', 'llm', 'ai',
+        'true', 'false', 'null', 'none', 'yes', 'no',
+        # Common nouns
+        'user', 'users', 'system', 'systems', 'file', 'files',
+        'project', 'projects', 'memory', 'memories', 'data', 'database',
+        'error', 'warning', 'note', 'notes', 'todo', 'task', 'tasks',
+        # Title prefixes (not names themselves)
+        'dr', 'dr.', 'mr', 'mr.', 'mrs', 'mrs.', 'ms', 'ms.',
+        'prof', 'prof.', 'professor', 'sir', 'rev', 'rev.',
+    }
+
+    # Common first names for higher confidence matching
+    COMMON_FIRST_NAMES: Set[str] = {
+        # Male names
+        'james', 'john', 'robert', 'michael', 'william', 'david', 'richard',
+        'joseph', 'thomas', 'charles', 'christopher', 'daniel', 'matthew',
+        'anthony', 'mark', 'donald', 'steven', 'paul', 'andrew', 'joshua',
+        'kenneth', 'kevin', 'brian', 'george', 'timothy', 'ronald', 'edward',
+        'jason', 'jeffrey', 'ryan', 'jacob', 'gary', 'nicholas', 'eric',
+        'jonathan', 'stephen', 'larry', 'justin', 'scott', 'brandon', 'benjamin',
+        'samuel', 'raymond', 'gregory', 'frank', 'alexander', 'patrick', 'jack',
+        # Female names
+        'mary', 'patricia', 'jennifer', 'linda', 'elizabeth', 'barbara', 'susan',
+        'jessica', 'sarah', 'karen', 'lisa', 'nancy', 'betty', 'margaret', 'sandra',
+        'ashley', 'kimberly', 'emily', 'donna', 'michelle', 'dorothy', 'carol',
+        'amanda', 'melissa', 'deborah', 'stephanie', 'rebecca', 'sharon', 'laura',
+        'cynthia', 'kathleen', 'amy', 'angela', 'shirley', 'anna', 'brenda',
+        'pamela', 'emma', 'nicole', 'helen', 'samantha', 'katherine', 'christine',
+        # Gender-neutral
+        'alex', 'chris', 'sam', 'taylor', 'jordan', 'casey', 'morgan', 'riley',
+        'jamie', 'quinn', 'avery', 'parker', 'hayden', 'cameron', 'drew',
+    }
+
     def __init__(self, custom_tools: Optional[Set[str]] = None,
-                 custom_orgs: Optional[Set[str]] = None):
-        """Initialize extractor with optional custom entity sets."""
+                 custom_orgs: Optional[Set[str]] = None,
+                 extract_names: bool = True,
+                 max_entities: int = 20):
+        """Initialize extractor with optional custom entity sets.
+
+        Args:
+            custom_tools: Additional tools to recognize
+            custom_orgs: Additional organizations to recognize
+            extract_names: Whether to extract person names (heuristic)
+            max_entities: Maximum entities to return per extraction
+        """
         self.tools = self.KNOWN_TOOLS.copy()
         self.orgs = self.KNOWN_ORGS.copy()
         self.concepts = self.KNOWN_CONCEPTS.copy()
+        self.extract_names = extract_names
+        self.max_entities = max_entities
 
         if custom_tools:
-            self.tools.update(custom_tools)
+            self.tools.update(t.lower() for t in custom_tools)
         if custom_orgs:
-            self.orgs.update(custom_orgs)
+            self.orgs.update(o.lower() for o in custom_orgs)
+
+    @classmethod
+    def from_config(cls) -> 'EntityExtractor':
+        """Create extractor from global config."""
+        try:
+            from .config import get_config
+            config = get_config()
+            return cls(
+                custom_tools=set(config.entities.additional_tools),
+                custom_orgs=set(config.entities.additional_orgs),
+                extract_names=config.entities.extract_names,
+                max_entities=config.entities.max_entities,
+            )
+        except ImportError:
+            return cls()
 
     def extract(self, content: str) -> List[Entity]:
         """Extract all entities from content.
 
-        Returns deduplicated list of entities found in the text.
+        Returns deduplicated list of entities found in the text,
+        capped at max_entities.
         """
         entities = []
 
@@ -163,10 +249,14 @@ class EntityExtractor:
         entities.extend(self._extract_tools(content))
         entities.extend(self._extract_projects(content))
         entities.extend(self._extract_concepts(content))
-        entities.extend(self._extract_people(content))
 
-        # Deduplicate by normalized name + type
-        return self._dedupe(entities)
+        # Only extract people if enabled
+        if self.extract_names:
+            entities.extend(self._extract_people(content))
+
+        # Deduplicate and cap
+        deduped = self._dedupe(entities)
+        return deduped[:self.max_entities]
 
     def _normalize(self, name: str) -> str:
         """Normalize entity name for comparison and storage."""
@@ -271,71 +361,128 @@ class EntityExtractor:
         return entities
 
     def _extract_people(self, content: str) -> List[Entity]:
-        """Extract person names from content.
+        """Extract person names from content using heuristics.
 
-        Looks for:
-        - Capitalized words that could be names
-        - Special handling for 'user', 'User'
+        Enhanced detection using:
+        - Name prefixes ("by John", "from Sarah")
+        - Two consecutive capitalized words ("John Smith")
+        - Possessive forms ("John's project")
+        - Known common first names
+        - Sentence boundary awareness
         """
         entities = []
 
-        # Handle 'user' as a person entity
-        if re.search(r'\buser\b', content, re.IGNORECASE):
-            entities.append(Entity(
-                name='User',
-                normalized='user',
-                type='person'
-            ))
+        # Split into sentences, but preserve title abbreviations (Dr., Mr., etc.)
+        # Use negative lookbehind to avoid splitting on common title abbreviations
+        sentence_pattern = r'(?<![Dd]r)(?<![Mm]r)(?<![Mm]rs)(?<![Mm]s)(?<![Pp]rof)(?<![Ss]r)(?<![Jj]r)[.!?]+'
+        sentences = re.split(sentence_pattern, content)
 
-        # Look for capitalized name patterns
-        # Pattern: One or two capitalized words that look like names
-        # Avoid matching at sentence starts by requiring preceding text or punctuation
-
-        # Common first names to boost confidence
-        common_names = {
-            'john', 'james', 'robert', 'michael', 'william', 'david', 'richard',
-            'joseph', 'thomas', 'charles', 'mary', 'patricia', 'jennifer',
-            'linda', 'elizabeth', 'barbara', 'susan', 'jessica', 'sarah',
-            'alex', 'chris', 'sam', 'taylor', 'jordan', 'casey', 'morgan',
-        }
-
-        # Find capitalized words that might be names
-        # Look for: word followed by another capitalized word (full name)
-        # Or standalone capitalized word that matches common names
-        name_pattern = r'(?<=[^\.\!\?\n])\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b'
-
-        for match in re.finditer(name_pattern, content):
-            potential_name = match.group(1)
-
-            # Skip if it's a known tool or org
-            if self._normalize(potential_name) in self.tools:
-                continue
-            if self._normalize(potential_name) in self.orgs:
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
                 continue
 
-            # Skip common words that might be capitalized
-            skip_words = {
-                'The', 'This', 'That', 'These', 'Those', 'What', 'When',
-                'Where', 'Which', 'Who', 'Why', 'How', 'If', 'Then',
-                'But', 'And', 'Or', 'Not', 'For', 'With', 'From',
-                'After', 'Before', 'During', 'About', 'Into', 'Through',
-                'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
-                'Saturday', 'Sunday', 'January', 'February', 'March',
-                'April', 'May', 'June', 'July', 'August', 'September',
-                'October', 'November', 'December',
-            }
-
-            if potential_name in skip_words:
+            words = sentence.split()
+            if not words:
                 continue
 
-            # Check if first word is a common name (higher confidence)
-            first_word = potential_name.split()[0].lower()
-            if first_word in common_names or ' ' in potential_name:
-                entities.append(Entity(
-                    name=potential_name,
-                    normalized=self._normalize(potential_name),
-                    type='person'
-                ))
+            i = 0
+            while i < len(words):
+                word = words[i]
+
+                # Clean the word for analysis
+                clean_word = re.sub(r'^["\'\(\[]|["\'\)\],;:]+$', '', word)
+
+                # Skip empty or too short
+                if len(clean_word) < 2:
+                    i += 1
+                    continue
+
+                # Skip if not capitalized
+                if not clean_word[0].isupper():
+                    i += 1
+                    continue
+
+                # Skip all-caps (acronyms like NASA, API)
+                if clean_word.isupper() and len(clean_word) > 1:
+                    i += 1
+                    continue
+
+                # Skip known tools, orgs, concepts
+                lower = clean_word.lower()
+                if lower in self.tools or lower in self.orgs or lower in self.concepts:
+                    i += 1
+                    continue
+
+                # Skip common non-name words
+                if lower in self.SKIP_WORDS:
+                    i += 1
+                    continue
+
+                # Now check patterns for name detection
+                is_name = False
+                detected_name = clean_word
+
+                # Pattern 1: After a name prefix ("by John", "from Sarah")
+                if i > 0:
+                    prev_word = re.sub(r'[.,;:]$', '', words[i-1].lower())
+                    if prev_word in self.NAME_PREFIXES:
+                        is_name = True
+
+                # Pattern 2: Check for full name (two consecutive capitalized words)
+                if i < len(words) - 1:
+                    next_word = words[i + 1]
+                    next_clean = re.sub(r'^["\'\(\[]|["\'\)\],;:]+$', '', next_word)
+
+                    if (len(next_clean) >= 2 and
+                        next_clean[0].isupper() and
+                        not next_clean.isupper() and
+                        next_clean.lower() not in self.SKIP_WORDS and
+                        next_clean.lower() not in self.tools):
+
+                        # This looks like a full name
+                        full_name = f"{clean_word} {next_clean}"
+                        full_lower = full_name.lower()
+
+                        # Don't match known organizations
+                        if full_lower not in self.orgs and self._normalize(full_name) not in self.orgs:
+                            entities.append(Entity(
+                                name=full_name,
+                                normalized=self._normalize(full_name),
+                                type='person'
+                            ))
+                            i += 2  # Skip both words
+                            continue
+
+                # Pattern 3: Possessive form ("John's project")
+                if clean_word.endswith("'s") or clean_word.endswith("'s"):
+                    name_part = clean_word.rstrip("'s").rstrip("'s")
+                    if len(name_part) >= 2:
+                        is_name = True
+                        detected_name = name_part
+
+                # Pattern 4: Known common first name
+                if lower in self.COMMON_FIRST_NAMES:
+                    is_name = True
+
+                # Pattern 5: Skip sentence-initial unless it's a known name or after prefix
+                if i == 0 and not is_name:
+                    # Only accept if it's a known first name
+                    if lower not in self.COMMON_FIRST_NAMES:
+                        i += 1
+                        continue
+
+                # If we determined it's a name, add it
+                if is_name and len(detected_name) >= 2:
+                    # Final check: not a tool/org
+                    if detected_name.lower() not in self.tools and detected_name.lower() not in self.orgs:
+                        entities.append(Entity(
+                            name=detected_name,
+                            normalized=self._normalize(detected_name),
+                            type='person'
+                        ))
+
+                i += 1
 
         return entities
 
@@ -522,10 +669,17 @@ _extractor: Optional[EntityExtractor] = None
 
 
 def get_extractor() -> EntityExtractor:
-    """Get or create the entity extractor singleton."""
+    """Get or create the entity extractor singleton (uses config)."""
     global _extractor
     if _extractor is None:
-        _extractor = EntityExtractor()
+        _extractor = EntityExtractor.from_config()
+    return _extractor
+
+
+def reload_extractor() -> EntityExtractor:
+    """Reload extractor with current config."""
+    global _extractor
+    _extractor = EntityExtractor.from_config()
     return _extractor
 
 
