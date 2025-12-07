@@ -4,7 +4,12 @@ llama-memory: Local vector memory for AI assistants.
 Uses llama.cpp for embeddings and sqlite-vec for similarity search.
 Fully local, no external APIs required.
 
-v2.6.0 adds:
+v2.7.0 adds:
+- Session persistence for Claude Code
+- Save and resume work sessions with task progress, decisions, next steps
+- MCP tools and CLI commands for session management
+
+v2.6.0 added:
 - Full config.yaml system with configurable weights
 - Enhanced entity extraction with name heuristics
 - Entity match scoring bonus in hybrid ranking
@@ -18,7 +23,7 @@ v2.5.0 added:
 - Document ingestion
 """
 
-__version__ = "2.6.0"
+__version__ = "2.7.0"
 
 from .config import (
     Config,
@@ -87,6 +92,21 @@ from .capture import (
     set_capture_mode,
     get_capture_status,
 )
+from .session import (
+    Session,
+    SessionStore,
+    get_session_store,
+    save_session,
+    resume_session,
+    list_sessions,
+    get_session,
+)
+from .transcript import (
+    TranscriptState,
+    TranscriptParser,
+    parse_transcript,
+    transcript_to_session_kwargs,
+)
 
 __all__ = [
     # Config
@@ -154,4 +174,17 @@ __all__ = [
     "get_capture_engine",
     "set_capture_mode",
     "get_capture_status",
+    # v2.7: Session Persistence
+    "Session",
+    "SessionStore",
+    "get_session_store",
+    "save_session",
+    "resume_session",
+    "list_sessions",
+    "get_session",
+    # v2.7: Transcript Parsing
+    "TranscriptState",
+    "TranscriptParser",
+    "parse_transcript",
+    "transcript_to_session_kwargs",
 ]

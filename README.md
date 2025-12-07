@@ -24,7 +24,15 @@ llama-memory solves this by using llama.cpp, which compiles to a single binary a
 - **Memory decay** - Auto-archives old conversational memories while protecting project knowledge
 - **Hierarchical memories** - Parent/child relationships for structured knowledge
 
-### v2.6 Features (NEW)
+### v2.7 Features (NEW)
+- **Session persistence** - Save and resume work sessions across context resets
+- **Task progress tracking** - Track completed and pending tasks within sessions
+- **Session decisions/next steps** - Capture key decisions and what to do next
+- **Resume prompts** - Generate context blocks for seamless session resumption
+- **Auto-capture hooks** - Claude Code hooks for automatic session save/restore
+- **Transcript parsing** - Extract session state from Claude Code conversation history
+
+### v2.6 Features
 - **Full config.yaml system** - All settings configurable via YAML
 - **Configurable scoring weights** - Tune semantic, importance, recency, frequency, confidence, entity_match weights
 - **Entity match scoring bonus** - Memories matching query entities rank higher
@@ -43,8 +51,8 @@ llama-memory solves this by using llama.cpp, which compiles to a single binary a
 ### Platform & Integration
 - **Fully local** - No internet required after setup
 - **Lightweight** - ~21MB embedding model, <150KB sqlite-vec extension
-- **MCP server** - Works with Claude Code and any MCP client (40 tools)
-- **CLI tool** - Full command-line interface (50+ commands)
+- **MCP server** - Works with Claude Code and any MCP client (44 tools)
+- **CLI tool** - Full command-line interface (60+ commands)
 - **Python API** - Import and use directly
 - **Runs on Android** - Works in Termux with Snapdragon 8 Elite and similar hardware
 - **5-year retention** - Built for long-term memory with configurable retention policies
@@ -254,7 +262,7 @@ Add to your Claude Code settings (`~/.claude.json` under `projects` or global `m
 }
 ```
 
-Then Claude Code will have access to 40 memory tools:
+Then Claude Code will have access to 44 memory tools:
 
 #### Core Operations
 | Tool | Description |
@@ -312,6 +320,14 @@ Then Claude Code will have access to 40 memory tools:
 | `memory_ingest` | Ingest documents (v2.5) |
 | `memory_capture` | Auto-capture modes (v2.5) |
 
+#### Session Persistence (v2.7)
+| Tool | Description |
+|------|-------------|
+| `session_save` | Save session state with progress, decisions, next steps |
+| `session_resume` | Get resume prompt for continuing a session |
+| `session_list` | List recent sessions |
+| `session_get` | Get full session details |
+
 ## Memory Types
 
 | Type | Use For |
@@ -322,6 +338,7 @@ Then Claude Code will have access to 40 memory tools:
 | `entity` | Projects, people, systems |
 | `context` | Current working state |
 | `procedure` | How to do something |
+| `session` | Work session state (v2.7) |
 
 ## Retention Policies
 
@@ -543,6 +560,159 @@ results = search("Claude and Anthropic announcements")
 
 This is controlled by `scoring.entity_match` weight in config.
 
+## v2.7 Features
+
+### Session Persistence
+
+Save and resume work sessions across Claude Code context resets or between conversations:
+
+```bash
+# Save current session state
+llama-memory session-save "Implementing auth feature" \
+  --summary "Adding OAuth2 to the API" \
+  --task "Implement OAuth2 authentication" \
+  --decision "Using Auth0 for identity provider" \
+  --decision "JWT tokens for session management" \
+  --next "Add token refresh endpoint" \
+  --next "Write integration tests" \
+  --blocker "Waiting for Auth0 credentials" \
+  --file "src/auth/oauth.py" \
+  --file "src/auth/tokens.py" \
+  --project "myapi"
+
+# List recent sessions
+llama-memory session-list
+llama-memory session-list --project myapi
+
+# Get session details
+llama-memory session-get 42
+
+# Get resume prompt for latest session
+llama-memory session-resume
+llama-memory session-resume --project myapi
+llama-memory session-resume --id 42
+```
+
+The resume prompt generates a structured context block that can be injected into a new conversation:
+
+```
+<session-resume>
+Resuming session: Implementing auth feature
+
+**Summary:** Adding OAuth2 to the API
+
+**Task:** Implement OAuth2 authentication
+
+**Key decisions made:**
+  - Using Auth0 for identity provider
+  - JWT tokens for session management
+
+**Next steps:**
+  - Add token refresh endpoint
+  - Write integration tests
+
+**Blockers:**
+  - Waiting for Auth0 credentials
+</session-resume>
+```
+
+### Session Python API
+
+```python
+from llama_memory import (
+    save_session,
+    resume_session,
+    list_sessions,
+    get_session,
+    Session,
+    SessionStore,
+)
+
+# Save a session
+session = save_session(
+    title="Feature implementation",
+    summary="Working on user auth",
+    task_description="Add OAuth2 support",
+    progress={"completed": 3, "total": 7, "items": [
+        {"task": "Design auth flow", "done": True},
+        {"task": "Create OAuth client", "done": True},
+        {"task": "Implement callback", "done": True},
+        {"task": "Add token refresh", "done": False},
+        {"task": "Write tests", "done": False},
+        {"task": "Update docs", "done": False},
+        {"task": "Deploy", "done": False},
+    ]},
+    files_touched=["src/auth.py", "tests/test_auth.py"],
+    decisions=["Using Auth0", "JWT for sessions"],
+    next_steps=["Add refresh endpoint", "Write tests"],
+    blockers=["Need Auth0 credentials"],
+    project="myapi",
+)
+print(f"Session saved: ID {session.id}")
+
+# Get resume prompt
+prompt = resume_session(project="myapi")
+print(prompt)
+
+# List sessions
+for s in list_sessions(limit=5):
+    print(f"[{s.id}] {s.title}")
+
+# Get specific session
+session = get_session(42)
+print(session.to_resume_prompt())
+```
+
+### Session MCP Tools
+
+When using the MCP server, four session tools are available:
+
+| Tool | Description |
+|------|-------------|
+| `session_save` | Save session with title, summary, progress, files, decisions, next steps, blockers |
+| `session_resume` | Get resume prompt for session (by ID or latest for project) |
+| `session_list` | List recent sessions, optionally filtered by project |
+| `session_get` | Get full session details by ID |
+
+### Auto-Capture Hooks (Claude Code Integration)
+
+For automatic session persistence without manual commands, install the Claude Code hooks:
+
+```bash
+# Install hooks
+llama-memory hooks-install
+
+# Check status
+llama-memory hooks-status
+
+# Remove hooks
+llama-memory hooks-uninstall
+```
+
+This installs three hooks into `~/.claude/settings.json`:
+
+| Hook | Trigger | Action |
+|------|---------|--------|
+| `PreCompact` | Before context compaction | Auto-saves session state |
+| `SessionEnd` | When you exit Claude Code | Auto-saves session state |
+| `SessionStart` | When session starts/resumes | Injects session context |
+
+**How it works:**
+
+1. **Before compaction**: When context fills up, Claude Code compacts old messages. The `PreCompact` hook saves your task state (todos, files, decisions) before compaction loses detail.
+
+2. **On exit**: The `SessionEnd` hook saves session state when you close Claude Code.
+
+3. **On start**: The `SessionStart` hook checks for recent sessions and automatically injects resume context, so Claude knows what you were working on.
+
+**Transcript parsing**: The hooks parse Claude Code's conversation transcript (JSONL) to extract:
+- Current todo list state (from TodoWrite tool calls)
+- Files read/written/edited
+- User messages (to infer task description)
+- Session ID and metadata
+
+This makes session persistence fully automatic - no manual `session-save` needed.
+
 ## Model Changes
 
 If you switch embedding models, use the reembed command:
@@ -577,10 +747,10 @@ This regenerates embeddings while preserving the original text.
 └── config.yaml        # Optional configuration overrides
 ```
 
-### Database Schema (v7)
+### Database Schema (v8)
 
 **Core tables:**
-- `memories` - Main table with content, type, project, importance, retention, confidence, parent_id, topic, protected, token_count, context, entities, file_path, chunk_of, chunk_index
+- `memories` - Main table with content, type (now includes 'session'), project, importance, retention, confidence, parent_id, topic, protected, token_count, context, entities, file_path, chunk_of, chunk_index
 - `memory_embeddings` - Vector embeddings (sqlite-vec virtual table)
 - `memories_fts` - Full-text search index (SQLite FTS5)
 - `memory_links` - Explicit relationships between memories (with weights)
@@ -617,8 +787,9 @@ On a Snapdragon 8 Elite (Samsung Galaxy S25):
 | Duplicate detection | Yes | Yes | No | No | No |
 | Document ingestion | Yes | No | No | Yes | No |
 | JSONL export | Yes | No | No | No | Yes |
-| MCP tools | 40 | 8 | 12 | 5 | 10 |
-| CLI commands | 50+ | 0 | 0 | 0 | 0 |
+| Session persistence | Yes | No | No | No | No |
+| MCP tools | 44 | 8 | 12 | 5 | 10 |
+| CLI commands | 60+ | 0 | 0 | 0 | 0 |
 
 ## Troubleshooting
 

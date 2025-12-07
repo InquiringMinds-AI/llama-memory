@@ -1440,6 +1440,392 @@ def cmd_sessions(args):
     return 0
 
 
+# ========== v2.7 Session Persistence Commands ==========
+
+def cmd_session_save(args):
+    """Save current session state."""
+    from .session import SessionStore
+    config = get_config()
+    store = get_store(config)
+    session_store = SessionStore(store)
+
+    # Parse progress if provided as JSON string
+    progress = None
+    if args.progress:
+        try:
+            progress = json.loads(args.progress)
+        except json.JSONDecodeError:
+            print(f"Error: Invalid JSON for progress: {args.progress}")
+            return 1
+
+    # Parse list arguments
+    files = args.file or []
+    decisions = args.decision or []
+    next_steps = args.next or []
+    blockers = args.blocker or []
+    tags = args.tag or []
+
+    session = session_store.save(
+        title=args.title,
+        summary=args.summary,
+        task_description=args.task,
+        progress=progress,
+        files_touched=files,
+        decisions=decisions,
+        next_steps=next_steps,
+        blockers=blockers,
+        project=args.project,
+        notes=args.notes,
+        tags=tags,
+    )
+
+    if args.format == 'json':
+        print(json.dumps({
+            "id": session.id,
+            "title": session.title,
+            "summary": session.summary,
+            "project": session.project,
+        }, indent=2))
+    else:
+        print(f"Session saved: ID {session.id}")
+        print(f"  Title: {session.title}")
+        if session.project:
+            print(f"  Project: {session.project}")
+        if session.next_steps:
+            print(f"  Next steps: {len(session.next_steps)} items")
+
+    return 0
+
+
+def cmd_session_resume(args):
+    """Get resume prompt for a session."""
+    from .session import SessionStore
+    config = get_config()
+    store = get_store(config)
+    session_store = SessionStore(store)
+
+    resume_prompt = session_store.resume(
+        session_id=args.id,
+        project=args.project,
+    )
+
+    if resume_prompt:
+        print(resume_prompt)
+    else:
+        print("No session found to resume.")
+        return 1
+
+    return 0
+
+
+def cmd_session_list(args):
+    """List saved sessions."""
+    from .session import SessionStore
+    config = get_config()
+    store = get_store(config)
+    session_store = SessionStore(store)
+
+    sessions = session_store.list(
+        project=args.project,
+        limit=args.limit,
+    )
+
+    if not sessions:
+        print("No sessions found.")
+        return 0
+
+    if args.format == 'json':
+        result = []
+        for s in sessions:
+            result.append({
+                "id": s.id,
+                "title": s.title,
+                "summary": s.summary,
+                "project": s.project,
+                "ended_at": s.ended_at,
+                "next_steps": s.next_steps,
+            })
+        print(json.dumps(result, indent=2))
+    else:
+        print("Saved sessions:")
+        for s in sessions:
+            from datetime import datetime
+            ended = datetime.fromtimestamp(s.ended_at).strftime("%Y-%m-%d %H:%M") if s.ended_at else "?"
+            project_str = f" [{s.project}]" if s.project else ""
+            print(f"\n  [{s.id}] {s.title}{project_str}")
+            print(f"      Saved: {ended}")
+            if s.next_steps:
+                print(f"      Next: {s.next_steps[0]}" + (f" (+{len(s.next_steps)-1} more)" if len(s.next_steps) > 1 else ""))
+
+    return 0
+
+
+def cmd_session_get(args):
+    """Get details of a session."""
+    from .session import SessionStore
+    config = get_config()
+    store = get_store(config)
+    session_store = SessionStore(store)
+
+    session = session_store.get(args.id)
+
+    if not session:
+        print(f"Session {args.id} not found.")
+        return 1
+
+    if args.format == 'json':
+        print(json.dumps({
+            "id": session.id,
+            "title": session.title,
+            "summary": session.summary,
+            "task_description": session.task_description,
+            "progress": session.progress,
+            "files_touched": session.files_touched,
+            "decisions": session.decisions,
+            "next_steps": session.next_steps,
+            "blockers": session.blockers,
+            "project": session.project,
+            "notes": session.notes,
+            "started_at": session.started_at,
+            "ended_at": session.ended_at,
+        }, indent=2))
+    else:
+        print(f"Session {session.id}: {session.title}")
+        if session.project:
+            print(f"Project: {session.project}")
+        if session.summary:
+            print(f"\nSummary: {session.summary}")
+        if session.task_description:
+            print(f"\nTask: {session.task_description}")
+        if session.progress:
+            c = session.progress.get('completed', 0)
+            t = session.progress.get('total', 0)
+            print(f"\nProgress: {c}/{t}")
+        if session.files_touched:
+            print(f"\nFiles: {', '.join(session.files_touched)}")
+        if session.decisions:
+            print("\nDecisions:")
+            for d in session.decisions:
+                print(f"  - {d}")
+        if session.next_steps:
+            print("\nNext steps:")
+            for n in session.next_steps:
+                print(f"  - {n}")
+        if session.blockers:
+            print("\nBlockers:")
+            for b in session.blockers:
+                print(f"  - {b}")
+        if session.notes:
+            print(f"\nNotes: {session.notes}")
+
+    return 0
+
+
+# ========== Hooks Commands ==========
+
+def cmd_hooks_install(args):
+    """Install Claude Code hooks for auto session capture."""
+    import json
+    from pathlib import Path
+    from .hooks import AUTO_SESSION_SAVE, AUTO_SESSION_RESUME
+
+    # Determine settings file location
+    settings_path = Path.home() / ".claude" / "settings.json"
+
+    # Create .claude directory if needed
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing settings or create new
+    if settings_path.exists():
+        with open(settings_path, 'r') as f:
+            try:
+                settings = json.load(f)
+            except json.JSONDecodeError:
+                settings = {}
+    else:
+        settings = {}
+
+    # Ensure hooks structure exists
+    if 'hooks' not in settings:
+        settings['hooks'] = {}
+
+    # Hook configurations
+    save_hook = {
+        "hooks": [{
+            "type": "command",
+            "command": f"python3 {AUTO_SESSION_SAVE}",
+            "timeout": 30
+        }]
+    }
+
+    resume_hook = {
+        "hooks": [{
+            "type": "command",
+            "command": f"python3 {AUTO_SESSION_RESUME}",
+            "timeout": 10
+        }]
+    }
+
+    # Install PreCompact hook
+    if 'PreCompact' not in settings['hooks']:
+        settings['hooks']['PreCompact'] = []
+    # Check if our hook already exists
+    save_cmd = f"python3 {AUTO_SESSION_SAVE}"
+    existing_precompact = [h for h in settings['hooks']['PreCompact']
+                          if any(save_cmd in hk.get('command', '') for hk in h.get('hooks', []))]
+    if not existing_precompact:
+        settings['hooks']['PreCompact'].append(save_hook)
+        print("Installed: PreCompact hook (auto-save before compaction)")
+    else:
+        print("Already installed: PreCompact hook")
+
+    # Install SessionEnd hook
+    if 'SessionEnd' not in settings['hooks']:
+        settings['hooks']['SessionEnd'] = []
+    existing_sessionend = [h for h in settings['hooks']['SessionEnd']
+                          if any(save_cmd in hk.get('command', '') for hk in h.get('hooks', []))]
+    if not existing_sessionend:
+        settings['hooks']['SessionEnd'].append(save_hook)
+        print("Installed: SessionEnd hook (auto-save on exit)")
+    else:
+        print("Already installed: SessionEnd hook")
+
+    # Install SessionStart hook
+    if 'SessionStart' not in settings['hooks']:
+        settings['hooks']['SessionStart'] = []
+    resume_cmd = f"python3 {AUTO_SESSION_RESUME}"
+    existing_sessionstart = [h for h in settings['hooks']['SessionStart']
+                            if any(resume_cmd in hk.get('command', '') for hk in h.get('hooks', []))]
+    if not existing_sessionstart:
+        settings['hooks']['SessionStart'].append(resume_hook)
+        print("Installed: SessionStart hook (auto-resume context)")
+    else:
+        print("Already installed: SessionStart hook")
+
+    # Write settings
+    with open(settings_path, 'w') as f:
+        json.dump(settings, f, indent=2)
+
+    print(f"\nHooks configuration saved to: {settings_path}")
+    print("\nRestart Claude Code to activate hooks.")
+
+    return 0
+
+
+def cmd_hooks_status(args):
+    """Check if hooks are installed."""
+    import json
+    from pathlib import Path
+    from .hooks import AUTO_SESSION_SAVE, AUTO_SESSION_RESUME
+
+    settings_path = Path.home() / ".claude" / "settings.json"
+
+    if not settings_path.exists():
+        print("No Claude Code settings found.")
+        print(f"Expected at: {settings_path}")
+        print("\nRun 'mem hooks-install' to install hooks.")
+        return 1
+
+    with open(settings_path, 'r') as f:
+        try:
+            settings = json.load(f)
+        except json.JSONDecodeError:
+            print("Invalid settings.json")
+            return 1
+
+    hooks = settings.get('hooks', {})
+
+    print("Claude Code Hooks Status")
+    print("=" * 40)
+
+    # Check each hook
+    save_cmd = f"python3 {AUTO_SESSION_SAVE}"
+    resume_cmd = f"python3 {AUTO_SESSION_RESUME}"
+
+    def check_hook(hook_name, cmd):
+        hook_list = hooks.get(hook_name, [])
+        for h in hook_list:
+            for hk in h.get('hooks', []):
+                if cmd in hk.get('command', ''):
+                    return True
+        return False
+
+    precompact_ok = check_hook('PreCompact', save_cmd)
+    sessionend_ok = check_hook('SessionEnd', save_cmd)
+    sessionstart_ok = check_hook('SessionStart', resume_cmd)
+
+    print(f"PreCompact (auto-save):    {'Installed' if precompact_ok else 'Not installed'}")
+    print(f"SessionEnd (auto-save):    {'Installed' if sessionend_ok else 'Not installed'}")
+    print(f"SessionStart (auto-resume): {'Installed' if sessionstart_ok else 'Not installed'}")
+
+    print(f"\nSettings file: {settings_path}")
+
+    if not all([precompact_ok, sessionend_ok, sessionstart_ok]):
+        print("\nRun 'mem hooks-install' to install missing hooks.")
+        return 1
+
+    return 0
+
+
+def cmd_hooks_uninstall(args):
+    """Remove Claude Code hooks."""
+    import json
+    from pathlib import Path
+    from .hooks import AUTO_SESSION_SAVE, AUTO_SESSION_RESUME
+
+    settings_path = Path.home() / ".claude" / "settings.json"
+
+    if not settings_path.exists():
+        print("No Claude Code settings found.")
+        return 0
+
+    with open(settings_path, 'r') as f:
+        try:
+            settings = json.load(f)
+        except json.JSONDecodeError:
+            print("Invalid settings.json")
+            return 1
+
+    hooks = settings.get('hooks', {})
+    save_cmd = f"python3 {AUTO_SESSION_SAVE}"
+    resume_cmd = f"python3 {AUTO_SESSION_RESUME}"
+
+    removed = 0
+
+    for hook_name in ['PreCompact', 'SessionEnd', 'SessionStart']:
+        if hook_name in hooks:
+            original_len = len(hooks[hook_name])
+            # Filter out our hooks
+            if hook_name == 'SessionStart':
+                cmd_to_remove = resume_cmd
+            else:
+                cmd_to_remove = save_cmd
+
+            hooks[hook_name] = [
+                h for h in hooks[hook_name]
+                if not any(cmd_to_remove in hk.get('command', '') for hk in h.get('hooks', []))
+            ]
+
+            if len(hooks[hook_name]) < original_len:
+                removed += 1
+                print(f"Removed: {hook_name} hook")
+
+            # Clean up empty hook arrays
+            if not hooks[hook_name]:
+                del hooks[hook_name]
+
+    if removed > 0:
+        settings['hooks'] = hooks
+        with open(settings_path, 'w') as f:
+            json.dump(settings, f, indent=2)
+        print(f"\nRemoved {removed} hook(s).")
+        print("Restart Claude Code to apply changes.")
+    else:
+        print("No llama-memory hooks found to remove.")
+
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Local vector memory for AI assistants",
@@ -1759,6 +2145,57 @@ def main():
     p_protect.add_argument("id", type=int, help="Memory ID")
     p_protect.add_argument("--remove", "-r", action="store_true", help="Remove protection")
     p_protect.set_defaults(func=cmd_protect)
+
+    # ========== v2.7 Session Persistence Commands ==========
+
+    # session-save
+    p_sess_save = subparsers.add_parser("session-save", help="Save current session state")
+    p_sess_save.add_argument("title", help="Short title for the session")
+    p_sess_save.add_argument("--summary", "-s", help="Summary of what was being worked on")
+    p_sess_save.add_argument("--task", "-t", help="Detailed task description")
+    p_sess_save.add_argument("--progress", help="Progress JSON: {completed: N, total: M, items: [...]}")
+    p_sess_save.add_argument("--file", "-f", action="append", help="File touched (can repeat)")
+    p_sess_save.add_argument("--decision", "-d", action="append", help="Decision made (can repeat)")
+    p_sess_save.add_argument("--next", "-n", action="append", help="Next step (can repeat)")
+    p_sess_save.add_argument("--blocker", "-b", action="append", help="Blocker (can repeat)")
+    p_sess_save.add_argument("--project", "-p", help="Project name")
+    p_sess_save.add_argument("--notes", help="Additional notes")
+    p_sess_save.add_argument("--tag", action="append", help="Tag (can repeat)")
+    p_sess_save.add_argument("--format", choices=["text", "json"], default="text")
+    p_sess_save.set_defaults(func=cmd_session_save)
+
+    # session-resume
+    p_sess_resume = subparsers.add_parser("session-resume", help="Get resume prompt for a session")
+    p_sess_resume.add_argument("--id", type=int, help="Session ID (default: most recent)")
+    p_sess_resume.add_argument("--project", "-p", help="Filter by project")
+    p_sess_resume.set_defaults(func=cmd_session_resume)
+
+    # session-list
+    p_sess_list = subparsers.add_parser("session-list", help="List saved sessions")
+    p_sess_list.add_argument("--project", "-p", help="Filter by project")
+    p_sess_list.add_argument("--limit", "-l", type=int, default=10, help="Max sessions")
+    p_sess_list.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_sess_list.set_defaults(func=cmd_session_list)
+
+    # session-get
+    p_sess_get = subparsers.add_parser("session-get", help="Get session details")
+    p_sess_get.add_argument("id", type=int, help="Session ID")
+    p_sess_get.add_argument("--format", "-f", choices=["text", "json"], default="text")
+    p_sess_get.set_defaults(func=cmd_session_get)
+
+    # ========== Hooks Commands ==========
+
+    # hooks-install
+    p_hooks_install = subparsers.add_parser("hooks-install", help="Install Claude Code hooks for auto session capture")
+    p_hooks_install.set_defaults(func=cmd_hooks_install)
+
+    # hooks-status
+    p_hooks_status = subparsers.add_parser("hooks-status", help="Check if Claude Code hooks are installed")
+    p_hooks_status.set_defaults(func=cmd_hooks_status)
+
+    # hooks-uninstall
+    p_hooks_uninstall = subparsers.add_parser("hooks-uninstall", help="Remove Claude Code hooks")
+    p_hooks_uninstall.set_defaults(func=cmd_hooks_uninstall)
 
     args = parser.parse_args()
 

@@ -965,6 +965,115 @@ TOOLS = [
                 }
             }
         }
+    },
+    # Session persistence tools
+    {
+        "name": "session_save",
+        "description": "Save the current session state for later resumption. Use before context overflow or when switching tasks. Captures task progress, files, decisions, and next steps.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short title for the session (e.g., 'Refactoring auth system')"
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Summary of what was being worked on"
+                },
+                "task_description": {
+                    "type": "string",
+                    "description": "Detailed description of the task"
+                },
+                "progress": {
+                    "type": "object",
+                    "description": "Progress tracking: {completed: N, total: M, items: [{task: 'x', done: true}, ...]}"
+                },
+                "files_touched": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of files that were read or modified"
+                },
+                "decisions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Key decisions made during the session"
+                },
+                "next_steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "What to do next when resuming"
+                },
+                "blockers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "What's blocking progress"
+                },
+                "project": {
+                    "type": "string",
+                    "description": "Project name"
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Additional freeform notes"
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tags for categorization"
+                }
+            },
+            "required": ["title"]
+        }
+    },
+    {
+        "name": "session_resume",
+        "description": "Get a context block to resume a previous session. Returns formatted prompt with task state, progress, decisions, and next steps.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "integer",
+                    "description": "Specific session ID to resume. If omitted, gets the most recent session."
+                },
+                "project": {
+                    "type": "string",
+                    "description": "Filter by project when getting most recent session"
+                }
+            }
+        }
+    },
+    {
+        "name": "session_list",
+        "description": "List recent saved sessions.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {
+                    "type": "string",
+                    "description": "Filter by project"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of sessions to return",
+                    "default": 10
+                }
+            }
+        }
+    },
+    {
+        "name": "session_get",
+        "description": "Get details of a specific session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "integer",
+                    "description": "Session ID to retrieve"
+                }
+            },
+            "required": ["session_id"]
+        }
     }
 ]
 
@@ -1676,6 +1785,79 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
 
             else:
                 result_text = f"Error: Unknown action '{action}'"
+
+        # Session persistence tools
+        elif tool_name == "session_save":
+            from .session import SessionStore
+            session_store = SessionStore(store)
+            session = session_store.save(
+                title=args["title"],
+                summary=args.get("summary"),
+                task_description=args.get("task_description"),
+                progress=args.get("progress"),
+                files_touched=args.get("files_touched"),
+                decisions=args.get("decisions"),
+                next_steps=args.get("next_steps"),
+                blockers=args.get("blockers"),
+                project=args.get("project"),
+                notes=args.get("notes"),
+                tags=args.get("tags"),
+            )
+            result_text = f"Session saved with ID {session.id}: {session.title}"
+
+        elif tool_name == "session_resume":
+            from .session import SessionStore
+            session_store = SessionStore(store)
+            resume_prompt = session_store.resume(
+                session_id=args.get("session_id"),
+                project=args.get("project"),
+            )
+            if resume_prompt:
+                result_text = resume_prompt
+            else:
+                result_text = "No session found to resume."
+
+        elif tool_name == "session_list":
+            from .session import SessionStore
+            session_store = SessionStore(store)
+            sessions = session_store.list(
+                project=args.get("project"),
+                limit=args.get("limit", 10),
+            )
+            result_list = []
+            for s in sessions:
+                result_list.append({
+                    "id": s.id,
+                    "title": s.title,
+                    "summary": s.summary,
+                    "project": s.project,
+                    "ended_at": s.ended_at,
+                    "next_steps": s.next_steps[:3] if s.next_steps else [],
+                })
+            result_text = json.dumps(result_list, indent=2)
+
+        elif tool_name == "session_get":
+            from .session import SessionStore
+            session_store = SessionStore(store)
+            session = session_store.get(args["session_id"])
+            if session:
+                result_text = json.dumps({
+                    "id": session.id,
+                    "title": session.title,
+                    "summary": session.summary,
+                    "task_description": session.task_description,
+                    "progress": session.progress,
+                    "files_touched": session.files_touched,
+                    "decisions": session.decisions,
+                    "next_steps": session.next_steps,
+                    "blockers": session.blockers,
+                    "project": session.project,
+                    "notes": session.notes,
+                    "started_at": session.started_at,
+                    "ended_at": session.ended_at,
+                }, indent=2)
+            else:
+                result_text = f"Session {args['session_id']} not found"
 
         else:
             send_response(id, error={"code": -32601, "message": f"Unknown tool: {tool_name}"})

@@ -12,7 +12,7 @@ from typing import Optional
 from datetime import datetime
 from .config import Config, get_config
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Decay system constants
 DECAY_START_DAYS = 120  # Days without access before decay starts affecting ranking
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS memories (
     chunk_index INTEGER,  -- Position in document if chunked
     file_path TEXT,  -- Source file path if ingested
 
-    CONSTRAINT valid_type CHECK (type IN ('fact', 'decision', 'event', 'entity', 'context', 'procedure'))
+    CONSTRAINT valid_type CHECK (type IN ('fact', 'decision', 'event', 'entity', 'context', 'procedure', 'session'))
 );
 
 -- Indexes for common queries
@@ -551,6 +551,102 @@ class Database:
             self._backfill_summaries_and_tokens(conn)
 
             conn.commit()
+
+        if current_version < 8:
+            # Migration v7 -> v8: Add 'session' to valid_type CHECK constraint
+            # SQLite doesn't support ALTER CONSTRAINT, so we recreate the table
+            self._migrate_v8_session_type(conn)
+            conn.commit()
+
+    def _migrate_v8_session_type(self, conn: sqlite3.Connection):
+        """Migration v8: Add 'session' to valid memory types."""
+        # Disable foreign keys for the migration
+        conn.execute("PRAGMA foreign_keys = OFF")
+
+        # Clean up any failed previous attempt
+        conn.execute("DROP TABLE IF EXISTS memories_new")
+
+        # Create new table with updated CHECK constraint
+        # Note: embedding is stored in vec0 table, not here
+        conn.execute("""
+            CREATE TABLE memories_new (
+                id INTEGER PRIMARY KEY,
+                type TEXT NOT NULL DEFAULT 'fact',
+                content TEXT NOT NULL,
+                summary TEXT,
+                project TEXT,
+                tags TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER,
+                accessed_at INTEGER,
+                access_count INTEGER DEFAULT 0,
+                importance INTEGER DEFAULT 5,
+                retention TEXT DEFAULT 'long-term',
+                superseded_by INTEGER REFERENCES memories_new(id),
+                archived INTEGER DEFAULT 0,
+                embedding_model TEXT,
+                session_id TEXT,
+                source TEXT DEFAULT 'cli',
+                metadata TEXT,
+                confidence REAL DEFAULT 1.0,
+                parent_id INTEGER,
+                topic TEXT,
+                protected INTEGER DEFAULT 0,
+                token_count INTEGER,
+                context TEXT,
+                entities TEXT,
+                chunk_of INTEGER,
+                chunk_index INTEGER,
+                file_path TEXT,
+                CONSTRAINT valid_type CHECK (type IN ('fact', 'decision', 'event', 'entity', 'context', 'procedure', 'session'))
+            )
+        """)
+
+        # Copy all data from old table
+        conn.execute("""
+            INSERT INTO memories_new SELECT * FROM memories
+        """)
+
+        # Drop old table
+        conn.execute("DROP TABLE memories")
+
+        # Rename new table
+        conn.execute("ALTER TABLE memories_new RENAME TO memories")
+
+        # Recreate indexes
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type)",
+            "CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project)",
+            "CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(archived)",
+            "CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance)",
+            "CREATE INDEX IF NOT EXISTS idx_memories_retention ON memories(retention)",
+            "CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by)",
+            "CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source)",
+            "CREATE INDEX IF NOT EXISTS idx_memories_parent ON memories(parent_id)",
+            "CREATE INDEX IF NOT EXISTS idx_memories_topic ON memories(topic)",
+            "CREATE INDEX IF NOT EXISTS idx_memories_context ON memories(context)",
+            "CREATE INDEX IF NOT EXISTS idx_memories_chunk_of ON memories(chunk_of)",
+        ]
+        for idx_sql in indexes:
+            conn.execute(idx_sql)
+
+        # Recreate FTS table (needs to reference new table)
+        conn.execute("DROP TABLE IF EXISTS memories_fts")
+        conn.execute("""
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
+                content,
+                content='memories',
+                content_rowid='id'
+            )
+        """)
+
+        # Rebuild FTS index
+        conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+
+        # Re-enable foreign keys
+        conn.execute("PRAGMA foreign_keys = ON")
 
     def _backfill_summaries_and_tokens(self, conn: sqlite3.Connection):
         """Backfill summaries and token counts for existing memories."""
