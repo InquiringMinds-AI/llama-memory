@@ -12,7 +12,7 @@ from typing import Optional
 from datetime import datetime
 from .config import Config, get_config
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Decay system constants
 DECAY_START_DAYS = 120  # Days without access before decay starts affecting ranking
@@ -53,6 +53,14 @@ CREATE TABLE IF NOT EXISTS memories (
     -- v6 additions
     protected INTEGER DEFAULT 0,  -- Manually protected from decay (1 = protected)
 
+    -- v7 additions
+    token_count INTEGER,  -- Estimated token count for budgeting
+    context TEXT,  -- Named context (work, personal, etc.)
+    entities TEXT,  -- JSON: extracted entities
+    chunk_of INTEGER REFERENCES memories(id),  -- FK if chunk of larger document
+    chunk_index INTEGER,  -- Position in document if chunked
+    file_path TEXT,  -- Source file path if ingested
+
     CONSTRAINT valid_type CHECK (type IN ('fact', 'decision', 'event', 'entity', 'context', 'procedure'))
 );
 
@@ -68,6 +76,8 @@ CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);
 CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
 CREATE INDEX IF NOT EXISTS idx_memories_parent ON memories(parent_id);
 CREATE INDEX IF NOT EXISTS idx_memories_topic ON memories(topic);
+CREATE INDEX IF NOT EXISTS idx_memories_context ON memories(context);
+CREATE INDEX IF NOT EXISTS idx_memories_chunk_of ON memories(chunk_of);
 
 -- Full-text search on content
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -192,6 +202,54 @@ CREATE TABLE IF NOT EXISTS memory_conflicts (
 CREATE INDEX IF NOT EXISTS idx_conflicts_memory1 ON memory_conflicts(memory1_id);
 CREATE INDEX IF NOT EXISTS idx_conflicts_memory2 ON memory_conflicts(memory2_id);
 CREATE INDEX IF NOT EXISTS idx_conflicts_type ON memory_conflicts(conflict_type);
+
+-- v7: Entities table for extracted entities
+CREATE TABLE IF NOT EXISTS entities (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    normalized TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('person', 'project', 'tool', 'concept', 'organization', 'location')),
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    mention_count INTEGER DEFAULT 1,
+    metadata TEXT,
+    UNIQUE(normalized, type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
+CREATE INDEX IF NOT EXISTS idx_entities_normalized ON entities(normalized);
+
+-- v7: Junction table for memory-entity relationships
+CREATE TABLE IF NOT EXISTS memory_entities (
+    memory_id INTEGER NOT NULL,
+    entity_id INTEGER NOT NULL,
+    PRIMARY KEY (memory_id, entity_id),
+    FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE,
+    FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE
+);
+
+-- v7: Named contexts table
+CREATE TABLE IF NOT EXISTS contexts (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at INTEGER NOT NULL,
+    memory_count INTEGER DEFAULT 0,
+    is_default INTEGER DEFAULT 0
+);
+
+-- v7: Capture log for auto-capture mode
+CREATE TABLE IF NOT EXISTS capture_log (
+    id INTEGER PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    event_data TEXT NOT NULL,
+    memory_id INTEGER REFERENCES memories(id),
+    captured_at INTEGER NOT NULL,
+    processed INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_capture_log_type ON capture_log(event_type);
+CREATE INDEX IF NOT EXISTS idx_capture_log_processed ON capture_log(processed);
 """
 
 VECTOR_TABLE_SQL = """
@@ -412,6 +470,113 @@ class Database:
                     raise
 
             conn.commit()
+
+        if current_version < 7:
+            # Migration v6 -> v7: Add token budgeting, contexts, entities columns
+            new_columns = [
+                ("token_count", "INTEGER"),
+                ("context", "TEXT"),
+                ("entities", "TEXT"),
+                ("chunk_of", "INTEGER"),
+                ("chunk_index", "INTEGER"),
+                ("file_path", "TEXT"),
+            ]
+
+            for col_name, col_type in new_columns:
+                try:
+                    conn.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_type}")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
+
+            # Create new indexes
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_context ON memories(context)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_chunk_of ON memories(chunk_of)")
+
+            # Create entities table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS entities (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    normalized TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    first_seen INTEGER NOT NULL,
+                    last_seen INTEGER NOT NULL,
+                    mention_count INTEGER DEFAULT 1,
+                    metadata TEXT,
+                    UNIQUE(normalized, type)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entities_normalized ON entities(normalized)")
+
+            # Create memory_entities junction table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS memory_entities (
+                    memory_id INTEGER NOT NULL,
+                    entity_id INTEGER NOT NULL,
+                    PRIMARY KEY (memory_id, entity_id),
+                    FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE,
+                    FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE
+                )
+            """)
+
+            # Create contexts table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS contexts (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    created_at INTEGER NOT NULL,
+                    memory_count INTEGER DEFAULT 0,
+                    is_default INTEGER DEFAULT 0
+                )
+            """)
+
+            # Create capture_log table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS capture_log (
+                    id INTEGER PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    event_data TEXT NOT NULL,
+                    memory_id INTEGER,
+                    captured_at INTEGER NOT NULL,
+                    processed INTEGER DEFAULT 0
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_capture_log_type ON capture_log(event_type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_capture_log_processed ON capture_log(processed)")
+
+            # Backfill: Generate summaries and token counts for existing memories
+            self._backfill_summaries_and_tokens(conn)
+
+            conn.commit()
+
+    def _backfill_summaries_and_tokens(self, conn: sqlite3.Connection):
+        """Backfill summaries and token counts for existing memories."""
+        from .summarizer import auto_summarize, estimate_tokens
+
+        rows = conn.execute("""
+            SELECT id, content, summary FROM memories
+            WHERE (summary IS NULL OR summary = '') OR token_count IS NULL
+        """).fetchall()
+
+        for row in rows:
+            memory_id = row['id']
+            content = row['content']
+            existing_summary = row['summary']
+
+            # Generate summary if missing
+            summary = existing_summary
+            if not summary:
+                summary = auto_summarize(content, max_words=20)
+
+            # Estimate token count
+            token_count = estimate_tokens(content)
+
+            conn.execute("""
+                UPDATE memories SET summary = ?, token_count = ? WHERE id = ?
+            """, (summary, token_count, memory_id))
 
     def initialize(self):
         """Initialize database schema."""

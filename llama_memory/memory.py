@@ -67,6 +67,14 @@ class Memory:
     parent_id: Optional[int] = None  # v5: hierarchical parent
     topic: Optional[str] = None  # v5: auto-assigned topic/cluster
     protected: bool = False  # v6: manually protected from decay
+    # v7 additions
+    token_count: Optional[int] = None  # Estimated token count
+    context: Optional[str] = None  # Named context (work, personal, etc.)
+    entities: Optional[list] = None  # Extracted entities
+    chunk_of: Optional[int] = None  # FK if chunk of document
+    chunk_index: Optional[int] = None  # Position in document
+    file_path: Optional[str] = None  # Source file if ingested
+    # Computed fields
     distance: Optional[float] = None  # Raw vector distance
     score: Optional[float] = None  # Hybrid score (lower = better)
 
@@ -75,6 +83,8 @@ class Memory:
             self.tags = []
         if self.metadata is None:
             self.metadata = {}
+        if self.entities is None:
+            self.entities = []
 
     def to_dict(self) -> dict:
         return {
@@ -99,6 +109,14 @@ class Memory:
             'parent_id': self.parent_id,
             'topic': self.topic,
             'protected': self.protected,
+            # v7 fields
+            'token_count': self.token_count,
+            'context': self.context,
+            'entities': self.entities,
+            'chunk_of': self.chunk_of,
+            'chunk_index': self.chunk_index,
+            'file_path': self.file_path,
+            # Computed fields
             'distance': self.distance,
             'score': self.score,
         }
@@ -133,6 +151,7 @@ class MemoryStore:
     def _row_to_memory(self, row, distance: Optional[float] = None, score: Optional[float] = None) -> Memory:
         """Convert a database row to a Memory object."""
         metadata_str = _row_get(row, 'metadata')
+        entities_str = _row_get(row, 'entities')
         return Memory(
             id=row['id'],
             type=row['type'],
@@ -155,6 +174,14 @@ class MemoryStore:
             parent_id=_row_get(row, 'parent_id'),
             topic=_row_get(row, 'topic'),
             protected=bool(_row_get(row, 'protected', 0)),
+            # v7 fields
+            token_count=_row_get(row, 'token_count'),
+            context=_row_get(row, 'context'),
+            entities=json.loads(entities_str) if entities_str else [],
+            chunk_of=_row_get(row, 'chunk_of'),
+            chunk_index=_row_get(row, 'chunk_index'),
+            file_path=_row_get(row, 'file_path'),
+            # Computed fields
             distance=distance,
             score=score,
         )
@@ -208,14 +235,45 @@ class MemoryStore:
         topic: Optional[str] = None,
         check_duplicates: bool = True,
         force: bool = False,
+        # v7 parameters
+        context: Optional[str] = None,
+        auto_summarize: bool = True,
+        extract_entities: bool = True,
+        # Document ingestion parameters
+        file_path: Optional[str] = None,
+        chunk_of: Optional[int] = None,
+        chunk_index: Optional[int] = None,
     ) -> Tuple[int, Optional[DuplicateWarning]]:
         """Store a new memory with embedding.
 
         Returns tuple of (memory_id, duplicate_warning).
         If force=False and duplicate found, returns (-1, warning) without storing.
+
+        Args:
+            auto_summarize: If True and no summary provided, auto-generate one
+            extract_entities: If True, extract and store entities from content
+            file_path: Source file path if memory comes from document ingestion
+            chunk_of: Parent memory ID if this is a document chunk
+            chunk_index: Index of this chunk in the document
         """
+        from .summarizer import auto_summarize as generate_summary, estimate_tokens
+        from .entities import extract_entities as do_extract_entities, EntityStore
+
         now = int(datetime.now().timestamp())
         session = session_id or get_session_id()
+
+        # Auto-generate summary if not provided
+        if not summary and auto_summarize:
+            summary = generate_summary(content, max_words=20)
+
+        # Estimate token count
+        token_count = estimate_tokens(content)
+
+        # Extract entities from content
+        entities_list = []
+        if extract_entities:
+            extracted = do_extract_entities(content)
+            entities_list = [e.to_dict() for e in extracted]
 
         # Generate embedding
         embedding = get_embedding(content, self.config)
@@ -230,10 +288,10 @@ class MemoryStore:
 
         conn = self.db.conn
 
-        # Insert memory
+        # Insert memory with entities JSON and document ingestion fields
         cursor = conn.execute("""
-            INSERT INTO memories (type, content, summary, project, tags, created_at, importance, retention, embedding_model, session_id, source, metadata, confidence, parent_id, topic)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO memories (type, content, summary, project, tags, created_at, importance, retention, embedding_model, session_id, source, metadata, confidence, parent_id, topic, token_count, context, entities, file_path, chunk_of, chunk_index)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             type,
             content,
@@ -250,6 +308,12 @@ class MemoryStore:
             confidence,
             parent_id,
             topic,
+            token_count,
+            context,
+            json.dumps(entities_list) if entities_list else None,
+            file_path,
+            chunk_of,
+            chunk_index,
         ))
 
         memory_id = cursor.lastrowid
@@ -265,6 +329,20 @@ class MemoryStore:
             INSERT INTO embedding_versions (memory_id, model_version, embedding, created_at, is_current)
             VALUES (?, ?, ?, ?, 1)
         """, (memory_id, self.config.embedding_model_version, embedding_blob, now))
+
+        # Store entities in entities table and link to memory
+        if extract_entities and entities_list:
+            from .entities import Entity
+            entity_store = EntityStore(conn)
+            for entity_dict in entities_list:
+                entity = Entity(
+                    name=entity_dict['name'],
+                    normalized=entity_dict['normalized'],
+                    type=entity_dict['type'],
+                )
+                entity_id = entity_store.store_entity(entity)
+                if entity_id > 0:
+                    entity_store.link_memory_entities(memory_id, [entity_id])
 
         # Log the action
         conn.execute("""
@@ -487,6 +565,64 @@ class MemoryStore:
             results.append(self._row_to_memory(row))
 
         return results
+
+    def recall_budgeted(
+        self,
+        query: Optional[str] = None,
+        limit: int = 50,
+        max_tokens: int = 4000,
+        project: Optional[str] = None,
+        context: Optional[str] = None,
+        min_importance: Optional[int] = None,
+        type: Optional[MemoryType] = None,
+    ):
+        """Token-budgeted recall with dual-response pattern.
+
+        Returns all matching memory summaries plus full content for
+        top memories within token budget.
+
+        Args:
+            query: Optional search query (if None, returns high-importance memories)
+            limit: Maximum memories to consider
+            max_tokens: Token budget for response
+            project: Filter by project
+            context: Filter by named context
+            min_importance: Minimum importance level
+            type: Filter by memory type
+
+        Returns:
+            RecallResponse with summaries and full_memories
+        """
+        from .budget import TokenBudgetManager, RecallResponse
+
+        # Get memories - either by search or by importance
+        if query:
+            memories = self.search(
+                query=query,
+                limit=limit,
+                project=project,
+                min_importance=min_importance,
+                type=type,
+            )
+        else:
+            # No query - get high importance memories
+            memories = self.list(
+                limit=limit,
+                project=project,
+                type=type,
+                order_by='importance',
+            )
+            # Filter by min_importance if specified
+            if min_importance:
+                memories = [m for m in memories if m.importance >= min_importance]
+
+        # Filter by context if specified
+        if context:
+            memories = [m for m in memories if m.context == context or m.context is None]
+
+        # Apply token budget
+        manager = TokenBudgetManager(max_tokens=max_tokens)
+        return manager.allocate(memories, query)
 
     def list(
         self,
@@ -1516,6 +1652,357 @@ class MemoryStore:
         conn = self.db.conn
         result = conn.execute("SELECT value FROM meta WHERE key = 'last_decay_run'").fetchone()
         return int(result[0]) if result else None
+
+    # ========== v7 Context Management ==========
+
+    def create_context(self, name: str, description: Optional[str] = None) -> int:
+        """Create a named context for organizing memories.
+
+        Args:
+            name: Unique context name (e.g., 'work', 'personal', 'project-x')
+            description: Optional description of the context
+
+        Returns:
+            Context ID, or -1 if context already exists
+        """
+        conn = self.db.conn
+        now = int(datetime.now().timestamp())
+
+        try:
+            cursor = conn.execute("""
+                INSERT INTO contexts (name, description, created_at)
+                VALUES (?, ?, ?)
+            """, (name, description, now))
+            conn.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            if "UNIQUE constraint" in str(e):
+                return -1
+            raise
+
+    def list_contexts(self) -> list[dict]:
+        """List all named contexts with memory counts."""
+        conn = self.db.conn
+
+        # Get contexts with actual memory counts
+        rows = conn.execute("""
+            SELECT c.*,
+                   (SELECT COUNT(*) FROM memories m WHERE m.context = c.name AND m.archived = 0) as actual_count
+            FROM contexts c
+            ORDER BY actual_count DESC, c.name ASC
+        """).fetchall()
+
+        contexts = []
+        for row in rows:
+            contexts.append({
+                'id': row['id'],
+                'name': row['name'],
+                'description': row['description'],
+                'created_at': row['created_at'],
+                'memory_count': row['actual_count'],
+                'is_default': bool(row['is_default']),
+            })
+
+        return contexts
+
+    def get_context_stats(self, name: str) -> dict:
+        """Get detailed statistics for a named context.
+
+        Args:
+            name: Context name
+
+        Returns:
+            Dict with context info and stats, or error if not found
+        """
+        conn = self.db.conn
+
+        # Get context info
+        ctx_row = conn.execute("""
+            SELECT * FROM contexts WHERE name = ?
+        """, (name,)).fetchone()
+
+        if not ctx_row:
+            return {'error': f'Context "{name}" not found'}
+
+        # Get memory stats for this context
+        stats_rows = conn.execute("""
+            SELECT type, COUNT(*) as count, AVG(importance) as avg_importance
+            FROM memories
+            WHERE context = ? AND archived = 0
+            GROUP BY type
+        """, (name,)).fetchall()
+
+        by_type = {}
+        total = 0
+        for row in stats_rows:
+            by_type[row['type']] = {
+                'count': row['count'],
+                'avg_importance': round(row['avg_importance'], 2) if row['avg_importance'] else 0
+            }
+            total += row['count']
+
+        # Get recent memories
+        recent = conn.execute("""
+            SELECT id, content, type, importance, created_at
+            FROM memories
+            WHERE context = ? AND archived = 0
+            ORDER BY created_at DESC
+            LIMIT 5
+        """, (name,)).fetchall()
+
+        return {
+            'id': ctx_row['id'],
+            'name': ctx_row['name'],
+            'description': ctx_row['description'],
+            'created_at': ctx_row['created_at'],
+            'is_default': bool(ctx_row['is_default']),
+            'total_memories': total,
+            'by_type': by_type,
+            'recent_memories': [{
+                'id': r['id'],
+                'content': r['content'][:100] + '...' if len(r['content']) > 100 else r['content'],
+                'type': r['type'],
+                'importance': r['importance'],
+            } for r in recent],
+        }
+
+    def delete_context(self, name: str, migrate_to: Optional[str] = None) -> int:
+        """Delete a context and optionally migrate its memories.
+
+        Args:
+            name: Context name to delete
+            migrate_to: If provided, migrate memories to this context instead of clearing
+
+        Returns:
+            Number of memories affected
+        """
+        conn = self.db.conn
+        now = int(datetime.now().timestamp())
+
+        # Count affected memories
+        count = conn.execute("""
+            SELECT COUNT(*) FROM memories WHERE context = ? AND archived = 0
+        """, (name,)).fetchone()[0]
+
+        # Migrate or clear context from memories
+        if migrate_to:
+            conn.execute("""
+                UPDATE memories SET context = ?, updated_at = ?
+                WHERE context = ?
+            """, (migrate_to, now, name))
+        else:
+            conn.execute("""
+                UPDATE memories SET context = NULL, updated_at = ?
+                WHERE context = ?
+            """, (now, name))
+
+        # Delete the context
+        conn.execute("DELETE FROM contexts WHERE name = ?", (name,))
+        conn.commit()
+
+        return count
+
+    def set_default_context(self, name: str) -> bool:
+        """Set a context as the default for new memories.
+
+        Args:
+            name: Context name to set as default
+
+        Returns:
+            True if successful, False if context not found
+        """
+        conn = self.db.conn
+
+        # Check context exists
+        exists = conn.execute("SELECT 1 FROM contexts WHERE name = ?", (name,)).fetchone()
+        if not exists:
+            return False
+
+        # Clear existing default
+        conn.execute("UPDATE contexts SET is_default = 0 WHERE is_default = 1")
+
+        # Set new default
+        conn.execute("UPDATE contexts SET is_default = 1 WHERE name = ?", (name,))
+        conn.commit()
+        return True
+
+    def get_default_context(self) -> Optional[str]:
+        """Get the current default context name."""
+        conn = self.db.conn
+        row = conn.execute("SELECT name FROM contexts WHERE is_default = 1").fetchone()
+        return row['name'] if row else None
+
+    # ========== v7 Entity Methods ==========
+
+    def get_entities(
+        self,
+        query: Optional[str] = None,
+        type: Optional[str] = None,
+        limit: int = 50
+    ) -> list[dict]:
+        """Search or list entities.
+
+        Args:
+            query: Optional search query for entity name
+            type: Filter by entity type (person, project, tool, concept, organization, location)
+            limit: Maximum results
+
+        Returns:
+            List of entity dicts
+        """
+        from .entities import EntityStore
+        entity_store = EntityStore(self.db.conn)
+        return entity_store.search_entities(query=query, type=type, limit=limit)
+
+    def get_entity_memories(self, entity_id: int, limit: int = 50) -> list['Memory']:
+        """Get memories linked to a specific entity.
+
+        Args:
+            entity_id: Entity ID
+            limit: Maximum memories to return
+
+        Returns:
+            List of Memory objects
+        """
+        from .entities import EntityStore
+        entity_store = EntityStore(self.db.conn)
+        memory_ids = entity_store.get_memories_for_entity(entity_id, limit=limit)
+
+        memories = []
+        for mem_id in memory_ids:
+            mem = self.get(mem_id)
+            if mem and not mem.archived:
+                memories.append(mem)
+
+        return memories
+
+    def get_entity_stats(self) -> dict:
+        """Get statistics about all entities."""
+        from .entities import EntityStore
+        entity_store = EntityStore(self.db.conn)
+        return entity_store.get_entity_stats()
+
+    # ========== v7 JSONL Export/Import ==========
+
+    def export_jsonl(self, path: str, include_archived: bool = False) -> int:
+        """Export all memories to JSONL file.
+
+        JSONL format is git-friendly (one JSON object per line) and human-readable.
+
+        Args:
+            path: Output file path
+            include_archived: Include archived memories
+
+        Returns:
+            Number of memories exported
+        """
+        from . import __version__
+
+        memories = self.list(limit=100000, include_archived=include_archived)
+
+        with open(path, 'w', encoding='utf-8') as f:
+            # Write metadata line first
+            meta = {
+                "_type": "meta",
+                "version": __version__,
+                "exported_at": int(datetime.now().timestamp()),
+                "count": len(memories)
+            }
+            f.write(json.dumps(meta) + '\n')
+
+            # Write each memory
+            for mem in memories:
+                f.write(json.dumps(mem.to_dict()) + '\n')
+
+        return len(memories)
+
+    def import_jsonl(
+        self,
+        path: str,
+        merge_strategy: str = 'skip',
+        context: Optional[str] = None,
+    ) -> dict:
+        """Import memories from JSONL file.
+
+        Args:
+            path: Input file path
+            merge_strategy: How to handle existing memories
+                - 'skip': Skip if ID exists
+                - 'overwrite': Replace existing
+                - 'newer': Keep newer version
+            context: Optional context to assign to imported memories
+
+        Returns:
+            Dict with import stats (imported, skipped, updated)
+        """
+        stats = {'imported': 0, 'skipped': 0, 'updated': 0, 'errors': 0}
+
+        with open(path, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    data = json.loads(line)
+
+                    # Skip metadata line
+                    if data.get('_type') == 'meta':
+                        continue
+
+                    # Extract content
+                    content = data.get('content')
+                    if not content:
+                        stats['errors'] += 1
+                        continue
+
+                    # Check if memory with this content exists
+                    existing = self.check_duplicate(content)
+
+                    if existing and merge_strategy == 'skip':
+                        stats['skipped'] += 1
+                        continue
+
+                    if existing and merge_strategy == 'newer':
+                        existing_mem = self.get(existing.existing_id)
+                        if existing_mem and existing_mem.created_at >= data.get('created_at', 0):
+                            stats['skipped'] += 1
+                            continue
+
+                    if existing and merge_strategy == 'overwrite':
+                        # Update existing
+                        self.update(
+                            existing.existing_id,
+                            content=content,
+                            summary=data.get('summary'),
+                            importance=data.get('importance'),
+                            tags=data.get('tags'),
+                        )
+                        stats['updated'] += 1
+                        continue
+
+                    # Store new memory
+                    self.store(
+                        content=content,
+                        type=data.get('type', 'fact'),
+                        summary=data.get('summary'),
+                        project=data.get('project'),
+                        tags=data.get('tags', []),
+                        importance=data.get('importance', 5),
+                        retention=data.get('retention', 'long-term'),
+                        context=context or data.get('context'),
+                        source='import',
+                        force=True,  # Don't fail on duplicates
+                        auto_summarize=not data.get('summary'),  # Only auto-summarize if no summary
+                    )
+                    stats['imported'] += 1
+
+                except json.JSONDecodeError:
+                    stats['errors'] += 1
+                except Exception as e:
+                    stats['errors'] += 1
+
+        return stats
 
 
 # Module-level convenience functions

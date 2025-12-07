@@ -15,17 +15,29 @@ llama-memory solves this by using llama.cpp, which compiles to a single binary a
 
 ## Features
 
+### Core Features
 - **Semantic search** - Find related memories even without exact keyword matches
 - **Hybrid ranking** - Combines vector distance with importance, recency, and access patterns
 - **Duplicate detection** - Warns before storing similar content
+- **Conflict detection** - Identifies potentially contradicting memories
 - **Session tracking** - Groups memories by conversation session
 - **Memory decay** - Auto-archives old conversational memories while protecting project knowledge
 - **Hierarchical memories** - Parent/child relationships for structured knowledge
-- **Conflict detection** - Identifies potentially contradicting memories
+
+### v2.5 Features (NEW)
+- **Token-budgeted recall** - Dual-response pattern: all summaries + top memories within token budget
+- **Auto-summarization** - Automatically generates summaries on store
+- **Entity extraction** - Automatically extracts people, projects, tools, concepts, organizations
+- **Named contexts** - Organize memories by context (work, personal, project-specific)
+- **Document ingestion** - Ingest Markdown, text, JSON files with smart chunking
+- **JSONL export/import** - Git-friendly export format with merge strategies
+- **Auto-capture modes** - Green (all), brown (sessions), quiet (minimal) capture modes
+
+### Platform & Integration
 - **Fully local** - No internet required after setup
 - **Lightweight** - ~21MB embedding model, <150KB sqlite-vec extension
-- **MCP server** - Works with Claude Code and any MCP client (34 tools)
-- **CLI tool** - Full command-line interface (46 commands)
+- **MCP server** - Works with Claude Code and any MCP client (40 tools)
+- **CLI tool** - Full command-line interface (50+ commands)
 - **Python API** - Import and use directly
 - **Runs on Android** - Works in Termux with Snapdragon 8 Elite and similar hardware
 - **5-year retention** - Built for long-term memory with configurable retention policies
@@ -41,11 +53,11 @@ llama-memory solves this by using llama.cpp, which compiles to a single binary a
 
 | Platform | Architecture | Status |
 |----------|--------------|--------|
-| Linux | x86_64 | ✓ |
-| Linux | aarch64 | ✓ |
-| macOS | arm64 (M1/M2) | ✓ |
-| macOS | x86_64 | ✓ |
-| Android (Termux) | aarch64 | ✓ |
+| Linux | x86_64 | Works |
+| Linux | aarch64 | Works |
+| macOS | arm64 (M1/M2) | Works |
+| macOS | x86_64 | Works |
+| Android (Termux) | aarch64 | Works |
 
 ## Installation
 
@@ -181,9 +193,9 @@ llama-memory reembed --old-model "previous-model-name" --yes
 ### Python API
 
 ```python
-from llama_memory import store, search, stats
+from llama_memory import store, search, stats, get_store
 
-# Store
+# Basic usage
 memory_id = store(
     "Project X uses MIT license for brand building",
     type="decision",
@@ -191,18 +203,35 @@ memory_id = store(
     importance=8
 )
 
-# Search
 results = search("licensing decisions", limit=5)
 for memory in results:
     print(f"[{memory.id}] {memory.content} (distance: {memory.distance:.3f})")
 
-# Stats
-print(stats())
+# v2.5: Token-budgeted recall
+store_instance = get_store()
+response = store_instance.recall_budgeted(query="project decisions", max_tokens=2000)
+print(f"Total matches: {response.total_matches}")
+print(f"Full memories: {len(response.full_memories)}")
+print(f"Tokens used: {response.tokens_used}/{response.tokens_budget}")
+
+# v2.5: Entity extraction
+from llama_memory import extract_entities
+entities = extract_entities("Using Python with SQLite and MCP protocol")
+for e in entities:
+    print(f"[{e.type}] {e.name}")
+
+# v2.5: Document ingestion
+from llama_memory import ingest_document
+memory_ids = ingest_document("document.md", importance=6)
+
+# v2.5: Named contexts
+store_instance.create_context("work", "Work-related memories")
+store_instance.store(content="Meeting notes...", context="work")
 ```
 
 ### MCP Server (Claude Code)
 
-Add to your Claude Code settings (`~/.claude/settings.local.json`):
+Add to your Claude Code settings (`~/.claude.json` under `projects` or global `mcpServers`):
 
 ```json
 {
@@ -218,11 +247,12 @@ Add to your Claude Code settings (`~/.claude/settings.local.json`):
 }
 ```
 
-Then Claude Code will have access to 34 memory tools:
+Then Claude Code will have access to 40 memory tools:
 
+#### Core Operations
 | Tool | Description |
 |------|-------------|
-| `memory_store` | Store new memories (with duplicate detection) |
+| `memory_store` | Store new memories (with duplicate detection, auto-summarization, entity extraction) |
 | `memory_search` | Semantic search with hybrid ranking |
 | `memory_search_text` | Fast full-text search |
 | `memory_list` | List recent memories |
@@ -232,30 +262,48 @@ Then Claude Code will have access to 34 memory tools:
 | `memory_delete` | Archive or delete (with cascade option) |
 | `memory_unarchive` | Restore archived memory |
 | `memory_stats` | Statistics |
+
+#### Export & Recall
+| Tool | Description |
+|------|-------------|
+| `memory_recall` | Get context block (supports token budgeting) |
 | `memory_export` | Export to JSON |
 | `memory_export_md` | Export to Markdown |
 | `memory_export_csv` | Export to CSV |
-| `memory_cleanup` | Archive expired memories |
-| `memory_recall` | Get context block for session start |
+| `memory_export_jsonl` | Export to JSONL (git-friendly) |
+| `memory_import_jsonl` | Import from JSONL |
+
+#### Organization
+| Tool | Description |
+|------|-------------|
 | `memory_related` | Find related memories |
 | `memory_projects` | List all projects |
 | `memory_sessions` | List/browse sessions |
+| `memory_contexts` | Manage named contexts (v2.5) |
+| `memory_entities` | Search extracted entities (v2.5) |
 | `memory_link` | Create link between memories |
 | `memory_unlink` | Remove link |
 | `memory_links` | Get links for a memory |
 | `memory_types` | List memory types |
 | `memory_count` | Count memories |
 | `memory_topics` | List/get/set topics |
+| `memory_tags` | List all tags |
+
+#### Advanced
+| Tool | Description |
+|------|-------------|
 | `memory_merge` | Merge multiple memories |
 | `memory_children` | Get child memories |
 | `memory_parent` | Get/set parent memory |
 | `memory_confidence` | Set confidence level |
 | `memory_conflicts` | Check for conflicts |
+| `memory_cleanup` | Archive expired memories |
 | `memory_decay` | Decay status and run |
 | `memory_protect` | Protect from decay |
-| `memory_tags` | List all tags |
 | `memory_history` | Memory access history |
 | `memory_search_history` | Search query patterns |
+| `memory_ingest` | Ingest documents (v2.5) |
+| `memory_capture` | Auto-capture modes (v2.5) |
 
 ## Memory Types
 
@@ -312,6 +360,74 @@ llama-memory protect 42 --remove  # remove protection
 - 120 days without access: starts affecting search ranking
 - 180 days without access: auto-archived (if not protected)
 
+## v2.5 Features
+
+### Token-Budgeted Recall
+
+Get all matching memories as summaries, plus full content for top matches within a token budget:
+
+```python
+response = store.recall_budgeted(query="topic", max_tokens=4000)
+# response.summaries = ALL matching memories as summaries
+# response.full_memories = Top memories with full content (within budget)
+# response.tokens_used = Actual tokens used
+```
+
+### Entity Extraction
+
+Automatically extracts and indexes entities from memory content:
+
+- **Projects**: kebab-case identifiers (llama-memory, claude-code)
+- **Tools**: Known dev tools, languages, frameworks (Python, SQLite, MCP)
+- **People**: Names and user references
+- **Concepts**: Technical terms (API, embedding, vector)
+- **Organizations**: Companies (Anthropic, Github)
+
+```bash
+# Search entities via CLI
+llama-memory entities list
+llama-memory entities search "llama"
+llama-memory entities type tool
+```
+
+### Named Contexts
+
+Organize memories by context:
+
+```python
+store.create_context("work", "Work-related memories")
+store.store(content="...", context="work")
+stats = store.get_context_stats("work")
+```
+
+### Document Ingestion
+
+Ingest documents with smart chunking:
+
+```bash
+llama-memory ingest document.md --importance 6
+llama-memory ingest --list  # List ingested files
+```
+
+### JSONL Export/Import
+
+Git-friendly export format:
+
+```bash
+llama-memory export-jsonl memories.jsonl
+llama-memory import-jsonl memories.jsonl --merge skip
+```
+
+### Auto-Capture Modes
+
+Development modes for automatic memory capture:
+
+| Mode | Captures |
+|------|----------|
+| `green` | Files, commands, sessions, errors |
+| `brown` | Sessions and errors only |
+| `quiet` | Minimal (default) |
+
 ## Model Changes
 
 If you switch embedding models, use the reembed command:
@@ -346,35 +462,48 @@ This regenerates embeddings while preserving the original text.
 └── config.yaml        # Optional configuration overrides
 ```
 
-### Database Schema (v6)
+### Database Schema (v7)
 
-- `memories` - Main table with content, type, project, importance, retention, confidence, parent_id, topic, protected
+**Core tables:**
+- `memories` - Main table with content, type, project, importance, retention, confidence, parent_id, topic, protected, token_count, context, entities, file_path, chunk_of, chunk_index
 - `memory_embeddings` - Vector embeddings (sqlite-vec virtual table)
 - `memories_fts` - Full-text search index (SQLite FTS5)
 - `memory_links` - Explicit relationships between memories (with weights)
 - `memory_log` - Audit log for debugging
 - `embedding_versions` - Track embeddings across model migrations
 - `search_history` - Query pattern tracking
-- `topics` - Topic definitions
 - `memory_conflicts` - Potential contradiction tracking
-- `meta` - System metadata (decay runs, etc.)
+- `meta` - System metadata (decay runs, capture config, etc.)
+
+**v2.5 tables:**
+- `entities` - Extracted entities (name, type, mention_count)
+- `memory_entities` - Memory-entity junction table
+- `contexts` - Named contexts for organization
+- `capture_log` - Auto-capture event log
 
 ## Performance
 
 On a Snapdragon 8 Elite (Samsung Galaxy S25):
 - Embedding generation: ~30-50ms per memory
 - Semantic search: <100ms for 10 results
+- Entity extraction: <5ms per memory
 - Database size: ~1KB per memory (with embedding)
 
 ## Comparison
 
-| Feature | llama-memory | mcp-memory-service | mcp-memory-keeper |
-|---------|--------------|-------------------|-------------------|
-| Local embeddings | ✓ llama.cpp | ONNX (x86 only) | None |
-| Runs on Android | ✓ | ✗ | ✓ |
-| Semantic search | ✓ | ✓ | ✗ |
-| Dependencies | Minimal | Heavy (PyTorch optional) | Minimal |
-| MCP server | ✓ | ✓ | ✓ |
+| Feature | llama-memory | mcp-memory-service | claude-memory-mcp | Memento | mcp-knowledge-graph |
+|---------|--------------|-------------------|-------------------|---------|---------------------|
+| Local embeddings | llama.cpp | ONNX (x86 only) | Cloud API | Local | Cloud API |
+| Runs on Android | Yes | No | No | No | No |
+| Semantic search | Yes | Yes | Yes | Yes | Yes |
+| Token budgeting | Yes | No | Yes | No | No |
+| Entity extraction | Yes | No | No | No | Yes |
+| Conflict detection | Yes | No | No | No | No |
+| Duplicate detection | Yes | Yes | No | No | No |
+| Document ingestion | Yes | No | No | Yes | No |
+| JSONL export | Yes | No | No | No | Yes |
+| MCP tools | 40 | 8 | 12 | 5 | 10 |
+| CLI commands | 50+ | 0 | 0 | 0 | 0 |
 
 ## Troubleshooting
 

@@ -85,6 +85,10 @@ TOOLS = [
                 "metadata": {
                     "type": "object",
                     "description": "Additional metadata to store with the memory (JSON object)"
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Named context for this memory (work, personal, etc.). Used to organize memories."
                 }
             },
             "required": ["content"]
@@ -329,6 +333,15 @@ TOOLS = [
                     "type": "string",
                     "enum": ["compact", "markdown", "json"],
                     "default": "compact"
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Token budget for response. If set, uses dual-response pattern: returns ALL summaries + full content for top memories within budget.",
+                    "default": None
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Filter by named context (work, personal, etc.)"
                 }
             }
         }
@@ -736,6 +749,222 @@ TOOLS = [
                 }
             }
         }
+    },
+    # ========== v2.5 Tools ==========
+    {
+        "name": "memory_contexts",
+        "description": "Manage named contexts for organizing memories. Contexts allow grouping memories by topic, project, or any category.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "create", "get", "delete", "set_default"],
+                    "description": "Action to perform: list all contexts, create new, get stats, delete, or set default",
+                    "default": "list"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Context name (required for create, get, delete, set_default)"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Context description (optional, for create)"
+                },
+                "migrate_to": {
+                    "type": "string",
+                    "description": "When deleting, migrate memories to this context instead of clearing"
+                }
+            }
+        }
+    },
+    {
+        "name": "memory_entities",
+        "description": "Search and explore extracted entities (people, projects, tools, concepts, organizations). Entities are automatically extracted from memory content.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "search", "stats", "memories"],
+                    "description": "Action: list entities, search by name, get stats, or get memories for an entity",
+                    "default": "list"
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Search query for entity name (for search action)"
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["person", "project", "tool", "concept", "organization", "location"],
+                    "description": "Filter by entity type"
+                },
+                "entity_id": {
+                    "type": "integer",
+                    "description": "Entity ID (for memories action)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 50,
+                    "description": "Maximum results to return"
+                }
+            }
+        }
+    },
+    {
+        "name": "memory_ingest",
+        "description": "Ingest a document file into memory. Supports Markdown, text, and JSON. Large files are automatically chunked into linked memories.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["ingest", "list", "delete"],
+                    "description": "Action: ingest a file, list ingested files, or delete ingested file",
+                    "default": "ingest"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "File path to ingest or filter by"
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["fact", "decision", "event", "entity", "context", "procedure"],
+                    "description": "Memory type for chunks",
+                    "default": "fact"
+                },
+                "importance": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "Importance level for chunks",
+                    "default": 5
+                },
+                "project": {
+                    "type": "string",
+                    "description": "Project to associate with"
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Named context for memories"
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tags to apply to all chunks"
+                },
+                "max_chunk_size": {
+                    "type": "integer",
+                    "description": "Maximum characters per chunk",
+                    "default": 500
+                },
+                "hard_delete": {
+                    "type": "boolean",
+                    "description": "Permanently delete instead of archive (for delete action)",
+                    "default": False
+                }
+            }
+        }
+    },
+    {
+        "name": "memory_export_jsonl",
+        "description": "Export memories to JSONL file (git-friendly, one JSON per line).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Output file path"
+                },
+                "include_archived": {
+                    "type": "boolean",
+                    "description": "Include archived memories",
+                    "default": False
+                }
+            },
+            "required": ["path"]
+        }
+    },
+    {
+        "name": "memory_import_jsonl",
+        "description": "Import memories from JSONL file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Input file path"
+                },
+                "merge_strategy": {
+                    "type": "string",
+                    "enum": ["skip", "overwrite", "newer"],
+                    "description": "How to handle duplicates: skip, overwrite, or keep newer",
+                    "default": "skip"
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Context to assign to imported memories"
+                }
+            },
+            "required": ["path"]
+        }
+    },
+    {
+        "name": "memory_capture",
+        "description": "Manage auto-capture modes for automatic memory creation. Modes: green (capture everything), brown (sessions only), quiet (minimal).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["status", "set_mode", "process", "log_discovery", "recent", "config"],
+                    "description": "Action: get status, set mode, process pending events, log a discovery, view recent events, or update config",
+                    "default": "status"
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["green", "brown", "quiet"],
+                    "description": "Capture mode (for set_mode action)"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Discovery content to log (for log_discovery action)"
+                },
+                "importance": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "Importance for discovery (for log_discovery action)",
+                    "default": 5
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Limit for process or recent actions",
+                    "default": 50
+                },
+                "event_type": {
+                    "type": "string",
+                    "enum": ["file_change", "command", "session_start", "session_end", "error", "discovery"],
+                    "description": "Filter by event type (for recent action)"
+                },
+                "capture_files": {
+                    "type": "boolean",
+                    "description": "Enable file capture (for config action)"
+                },
+                "capture_commands": {
+                    "type": "boolean",
+                    "description": "Enable command capture (for config action)"
+                },
+                "capture_sessions": {
+                    "type": "boolean",
+                    "description": "Enable session capture (for config action)"
+                },
+                "auto_context": {
+                    "type": "string",
+                    "description": "Default context for auto-captured memories (for config action)"
+                }
+            }
+        }
     }
 ]
 
@@ -779,6 +1008,7 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
                 force=args.get("force", False),
                 source='mcp',
                 metadata=args.get("metadata"),
+                context=args.get("context"),
             )
             if memory_id == -1 and duplicate:
                 result_text = f"Duplicate detected! Similar memory exists (ID: {duplicate.existing_id}, similarity: {duplicate.similarity:.1%}). Use force=true to store anyway."
@@ -869,42 +1099,61 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
             project = args.get("project")
             min_importance = args.get("min_importance")
             fmt = args.get("format", "compact")
+            max_tokens = args.get("max_tokens")
+            context = args.get("context")
 
-            if query:
-                memories = store.search(
+            # Use token-budgeted recall if max_tokens specified
+            if max_tokens:
+                response = store.recall_budgeted(
                     query=query,
                     limit=limit,
+                    max_tokens=max_tokens,
                     project=project,
-                    min_importance=min_importance or 5,
+                    context=context,
+                    min_importance=min_importance,
                 )
+                result_text = json.dumps(response.to_dict(), indent=2)
             else:
-                memories = store.list(
-                    limit=limit,
-                    project=project,
-                    order_by='accessed_at',
-                )
-                memories = [m for m in memories if m.importance >= (min_importance or 7)]
+                # Legacy recall behavior
+                if query:
+                    memories = store.search(
+                        query=query,
+                        limit=limit,
+                        project=project,
+                        min_importance=min_importance or 5,
+                    )
+                else:
+                    memories = store.list(
+                        limit=limit,
+                        project=project,
+                        order_by='accessed_at',
+                    )
+                    memories = [m for m in memories if m.importance >= (min_importance or 7)]
 
-            if fmt == "markdown":
-                lines = ["# Memory Context\n"]
-                for m in memories:
-                    lines.append(f"## [{m.type.upper()}] (importance: {m.importance})")
-                    if m.project:
-                        lines.append(f"*Project: {m.project}*\n")
-                    lines.append(m.content)
-                    lines.append("")
-                result_text = "\n".join(lines)
-            elif fmt == "compact":
-                lines = []
-                for m in memories:
-                    prefix = f"[{m.type}:{m.importance}]"
-                    if m.project:
-                        prefix += f" ({m.project})"
-                    content = m.content[:150] + "..." if len(m.content) > 150 else m.content
-                    lines.append(f"{prefix} {content}")
-                result_text = "\n".join(lines)
-            else:
-                result_text = json.dumps([m.to_dict() for m in memories], indent=2)
+                # Filter by context if specified
+                if context:
+                    memories = [m for m in memories if getattr(m, 'context', None) == context or getattr(m, 'context', None) is None]
+
+                if fmt == "markdown":
+                    lines = ["# Memory Context\n"]
+                    for m in memories:
+                        lines.append(f"## [{m.type.upper()}] (importance: {m.importance})")
+                        if m.project:
+                            lines.append(f"*Project: {m.project}*\n")
+                        lines.append(m.content)
+                        lines.append("")
+                    result_text = "\n".join(lines)
+                elif fmt == "compact":
+                    lines = []
+                    for m in memories:
+                        prefix = f"[{m.type}:{m.importance}]"
+                        if m.project:
+                            prefix += f" ({m.project})"
+                        content = m.content[:150] + "..." if len(m.content) > 150 else m.content
+                        lines.append(f"{prefix} {content}")
+                    result_text = "\n".join(lines)
+                else:
+                    result_text = json.dumps([m.to_dict() for m in memories], indent=2)
 
         elif tool_name == "memory_related":
             source = store.get(args["id"])
@@ -1218,6 +1467,216 @@ def handle_call_tool(id: Any, params: dict, store: MemoryStore):
                 popular = store.get_popular_queries(limit=limit)
                 result_text = json.dumps(popular, indent=2)
 
+        # ========== v2.5 Tool Handlers ==========
+
+        elif tool_name == "memory_contexts":
+            action = args.get("action", "list")
+
+            if action == "list":
+                contexts = store.list_contexts()
+                default = store.get_default_context()
+                result_text = json.dumps({
+                    "contexts": contexts,
+                    "default": default
+                }, indent=2)
+
+            elif action == "create":
+                name = args.get("name")
+                if not name:
+                    result_text = "Error: name required for create action"
+                else:
+                    ctx_id = store.create_context(name, args.get("description"))
+                    if ctx_id == -1:
+                        result_text = f"Error: Context '{name}' already exists"
+                    else:
+                        result_text = f"Created context '{name}' with ID {ctx_id}"
+
+            elif action == "get":
+                name = args.get("name")
+                if not name:
+                    result_text = "Error: name required for get action"
+                else:
+                    stats = store.get_context_stats(name)
+                    result_text = json.dumps(stats, indent=2)
+
+            elif action == "delete":
+                name = args.get("name")
+                if not name:
+                    result_text = "Error: name required for delete action"
+                else:
+                    count = store.delete_context(name, migrate_to=args.get("migrate_to"))
+                    migrate_note = f" (migrated to '{args.get('migrate_to')}')" if args.get("migrate_to") else ""
+                    result_text = f"Deleted context '{name}', affected {count} memories{migrate_note}"
+
+            elif action == "set_default":
+                name = args.get("name")
+                if not name:
+                    result_text = "Error: name required for set_default action"
+                else:
+                    if store.set_default_context(name):
+                        result_text = f"Set '{name}' as default context"
+                    else:
+                        result_text = f"Error: Context '{name}' not found"
+
+            else:
+                result_text = f"Error: Unknown action '{action}'"
+
+        elif tool_name == "memory_entities":
+            action = args.get("action", "list")
+            limit = args.get("limit", 50)
+
+            if action == "list":
+                entities = store.get_entities(type=args.get("type"), limit=limit)
+                result_text = json.dumps(entities, indent=2)
+
+            elif action == "search":
+                query = args.get("query")
+                if not query:
+                    result_text = "Error: query required for search action"
+                else:
+                    entities = store.get_entities(query=query, type=args.get("type"), limit=limit)
+                    result_text = json.dumps(entities, indent=2)
+
+            elif action == "stats":
+                stats = store.get_entity_stats()
+                result_text = json.dumps(stats, indent=2)
+
+            elif action == "memories":
+                entity_id = args.get("entity_id")
+                if not entity_id:
+                    result_text = "Error: entity_id required for memories action"
+                else:
+                    memories = store.get_entity_memories(entity_id, limit=limit)
+                    result_text = json.dumps([m.to_dict() for m in memories], indent=2)
+
+            else:
+                result_text = f"Error: Unknown action '{action}'"
+
+        elif tool_name == "memory_ingest":
+            from .ingester import Ingester
+            ingester = Ingester(store)
+            action = args.get("action", "ingest")
+
+            if action == "ingest":
+                path = args.get("path")
+                if not path:
+                    result_text = "Error: path required for ingest action"
+                else:
+                    try:
+                        memory_ids = ingester.ingest(
+                            path=path,
+                            type=args.get("type", "fact"),
+                            importance=args.get("importance", 5),
+                            project=args.get("project"),
+                            context=args.get("context"),
+                            tags=args.get("tags"),
+                            max_chunk_size=args.get("max_chunk_size"),
+                        )
+                        result_text = f"Ingested {path}: created {len(memory_ids)} memory chunks (IDs: {memory_ids[:5]}{'...' if len(memory_ids) > 5 else ''})"
+                    except FileNotFoundError:
+                        result_text = f"Error: File not found: {path}"
+                    except Exception as e:
+                        result_text = f"Error ingesting file: {e}"
+
+            elif action == "list":
+                files = ingester.list_ingested(path=args.get("path"))
+                result_text = json.dumps(files, indent=2)
+
+            elif action == "delete":
+                path = args.get("path")
+                if not path:
+                    result_text = "Error: path required for delete action"
+                else:
+                    count = ingester.delete_ingested(path, hard=args.get("hard_delete", False))
+                    result_text = f"Deleted {count} memory chunks from {path}"
+
+            else:
+                result_text = f"Error: Unknown action '{action}'"
+
+        elif tool_name == "memory_export_jsonl":
+            path = args.get("path")
+            if not path:
+                result_text = "Error: path required"
+            else:
+                try:
+                    count = store.export_jsonl(
+                        path=path,
+                        include_archived=args.get("include_archived", False)
+                    )
+                    result_text = f"Exported {count} memories to {path}"
+                except Exception as e:
+                    result_text = f"Error exporting: {e}"
+
+        elif tool_name == "memory_import_jsonl":
+            path = args.get("path")
+            if not path:
+                result_text = "Error: path required"
+            else:
+                try:
+                    stats = store.import_jsonl(
+                        path=path,
+                        merge_strategy=args.get("merge_strategy", "skip"),
+                        context=args.get("context")
+                    )
+                    result_text = f"Import complete: {stats['imported']} imported, {stats['skipped']} skipped, {stats['updated']} updated, {stats['errors']} errors"
+                except FileNotFoundError:
+                    result_text = f"Error: File not found: {path}"
+                except Exception as e:
+                    result_text = f"Error importing: {e}"
+
+        elif tool_name == "memory_capture":
+            from .capture import CaptureEngine
+            engine = CaptureEngine(store)
+            action = args.get("action", "status")
+
+            if action == "status":
+                status = engine.get_status()
+                result_text = json.dumps(status, indent=2)
+
+            elif action == "set_mode":
+                mode = args.get("mode")
+                if not mode:
+                    result_text = "Error: mode required for set_mode action"
+                else:
+                    config = engine.set_mode(mode)
+                    result_text = f"Capture mode set to '{mode}'. Files: {config.capture_files}, Commands: {config.capture_commands}, Sessions: {config.capture_sessions}"
+
+            elif action == "process":
+                limit = args.get("limit", 50)
+                stats = engine.process_pending(limit=limit)
+                result_text = f"Processed {stats['processed']} events: {stats['stored']} stored, {stats['skipped']} skipped, {stats['errors']} errors"
+
+            elif action == "log_discovery":
+                content = args.get("content")
+                if not content:
+                    result_text = "Error: content required for log_discovery action"
+                else:
+                    importance = args.get("importance", 5)
+                    log_id = engine.log_discovery(content, importance=importance)
+                    result_text = f"Logged discovery (ID: {log_id}). Use process action to store as memory."
+
+            elif action == "recent":
+                limit = args.get("limit", 50)
+                event_type = args.get("event_type")
+                events = engine.get_recent_events(limit=limit, event_type=event_type)
+                result_text = json.dumps(events, indent=2)
+
+            elif action == "config":
+                # Update specific config values
+                updates = {}
+                for key in ['capture_files', 'capture_commands', 'capture_sessions', 'auto_context']:
+                    if args.get(key) is not None:
+                        updates[key] = args[key]
+
+                if updates:
+                    config = engine.update_config(**updates)
+                    result_text = f"Config updated to custom mode: {json.dumps(config.to_dict(), indent=2)}"
+                else:
+                    result_text = json.dumps(engine.config.to_dict(), indent=2)
+
+            else:
+                result_text = f"Error: Unknown action '{action}'"
+
         else:
             send_response(id, error={"code": -32601, "message": f"Unknown tool: {tool_name}"})
             return
@@ -1248,7 +1707,11 @@ def run_server():
     store.initialize()
 
     # Process JSON-RPC messages
-    for line in sys.stdin:
+    # Use readline() instead of for-in iteration to avoid buffered read-ahead issues
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break
         try:
             request = json.loads(line)
             method = request.get("method")
